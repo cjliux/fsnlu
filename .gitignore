@@ -1,0 +1,6 @@
+.vscode/
+.ipython/
+__pycache__/
+data/
+results/
+*_exp/
