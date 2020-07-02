@@ -12,7 +12,7 @@
 
 
 ## Introduction 
-Developed on the event of [SMP 2020 ECDT Contest Task1](https://mp.weixin.qq.com/s/_dE7kDw8q7FgHfGTh8DMWw) by [Changjian Liu](https://cjliux.github.io), aiming at integrating various models for few-shot natural language understanding.
+Developed on the event of [SMP 2020 ECDT Task1](https://mp.weixin.qq.com/s/_dE7kDw8q7FgHfGTh8DMWw) by [Changjian Liu](https://cjliux.github.io), aiming at integrating various models for few-shot natural language understanding.
 
 
 ## Contributors
