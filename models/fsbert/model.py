@@ -1,5 +1,9 @@
 #coding: utf-8
+"""
+    @author: cjliux@gmail.com
+"""
 import os, sys
+import copy
 import logging
 import torch
 import torch.nn as nn
@@ -12,11 +16,11 @@ from utils.vocab import Vocab
 logger = logging.getLogger()
 
 
-class Model(nn.Nodule):
+class Model(nn.Module):
 
     def __init__(self, args, tokenizer=None):
         super().__init__()
-        self.params = params
+        self.args = args
 
         self.domain_map = Vocab.from_file(os.path.join(args.data_path, "domains.txt"))
         self.intent_map = Vocab.from_file(os.path.join(args.data_path, "intents.txt"))
@@ -25,30 +29,57 @@ class Model(nn.Nodule):
         self.bin_label_vocab = Vocab.from_file(os.path.join(args.data_path, "bin_label_vocab.txt"))
 
         self.tokenizer = tokenizer
+
+        label_list = {
+            "domain": copy.deepcopy(self.domain_map.index2word),
+            "intent": copy.deepcopy(self.intent_map.index2word),
+            "slots": copy.deepcopy(self.slots_map.index2word),
+            "label_vocab": self.label_vocab,
+        }
+
         self.bert_nlu = BertForTaskNLU.from_pretrained(
             os.path.join(args.bert_dir, "pytorch_model.bin"),
-            os.path.join(args.bert_dir, "bert_config.json"))
-        self.loss_fct = nn.CrossEntropyLoss()
+            os.path.join(args.bert_dir, "bert_config.json"),
+            label_list=label_list,
+            max_seq_len=args.max_seq_length)
+        self.loss_fct = nn.CrossEntropyLoss(size_average=False, reduce=False)
 
-        self.crf_layer = CRF(len(self.label_vocab))
+        self.crf_layer = CRF(self.label_vocab)
 
     def forward(self, batch):
         inputs = batch["model_input"]
+        padded_seqs = inputs["padded_seqs"].cuda() 
+        seq_lengths = inputs["seq_lengths"].cuda() 
+
+        # seq_lengths
+        max_len = seq_lengths.max().item()
+        idxes = torch.arange(0, max_len, out=torch.LongTensor(max_len)).unsqueeze(0)
+        attn_mask = (idxes.cuda() < seq_lengths.unsqueeze(1)).float()
+
         dom_logits, int_logits, sl_logits = self.bert_nlu(
-            inputs["token_ids"], inputs["segment_ids"],
-            attention_mask=inputs["input_mask"])
+            input_ids=padded_seqs, 
+            #token_type_ids=inputs["segment_ids"],
+            attention_mask=attn_mask)
         return { "dom_logits": dom_logits, 
             "int_logits": int_logits, "sl_logits": sl_logits}
 
-    def compute_loss(self, fwd_dict, batch):
-        dom_idx, int_idx = batch["dom_idx"], batch["int_idx"]
+    def compute_loss(self, batch, fwd_dict):
+        inputs = batch["model_input"]
+        dom_idx, int_idx = inputs["dom_idx"].cuda(), inputs["int_idx"].cuda()
         loss = (5 * self.loss_fct(fwd_dict["dom_logits"], dom_idx) 
                 + 3 * self.loss_fct(fwd_dict["int_logits"], int_idx))
-        loss += 2 * self.crf_layer.compute_loss(fwd_dict["sl_logits"], batch["padded_y"])
+
+        padded_y = inputs["padded_y"].cuda()
+        loss += 2 * self.crf_layer.compute_loss(fwd_dict["sl_logits"], padded_y)
         return loss.mean()
 
-    def predict(self, batch):
-        pass
+    def predict(self, batch, fwd_dict):
+        dom_pred = torch.argmax(fwd_dict["dom_logits"], dim=-1).detach().cpu().numpy()
+        int_pred = torch.argmax(fwd_dict["int_logits"], dim=-1).detach().cpu().numpy()
+        crf_pred = self.crf_layer(fwd_dict["sl_logits"])
+        lbl_pred = [crf_pred[i, :l].data.cpu().numpy() 
+                            for i, l in enumerate(batch["model_input"]["seq_lengths"])]
+        return dom_pred, int_pred, lbl_pred
 
 
 class CRF(nn.Module):
@@ -56,9 +87,10 @@ class CRF(nn.Module):
     Implements Conditional Random Fields that can be trained via
     backpropagation. 
     """
-    def __init__(self, num_tags):
+    def __init__(self, label_vocab):
         super().__init__()
-        self.num_tags = num_tags
+        self.label_vocab = label_vocab
+        self.num_tags = label_vocab.n_words
         self.transitions = nn.Parameter(torch.Tensor(num_tags, num_tags))
         self.start_transitions = nn.Parameter(torch.randn(num_tags))
         self.stop_transitions = nn.Parameter(torch.randn(num_tags))

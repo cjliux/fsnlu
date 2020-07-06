@@ -636,7 +636,8 @@ def train_model(params):
                 loss_tem0_list.append(loss_tem0)
                 loss_tem1_list.append(loss_tem1)
 
-                pbar.set_description("(Epoch {}) LOSS BIN:{:.4f} LOSS SLOT:{:.4f} LOSS TEM0:{:.4f} LOSS TEM1:{:.4f}".format((e+1), np.mean(loss_bin_list), np.mean(loss_slotname_list), np.mean(loss_tem0_list), np.mean(loss_tem1_list)))
+                pbar.set_description("(Epoch {}) LOSS BIN:{:.4f} LOSS SLOT:{:.4f} LOSS TEM0:{:.4f} LOSS TEM1:{:.4f}".format(
+                    (e+1), np.mean(loss_bin_list), np.mean(loss_slotname_list), np.mean(loss_tem0_list), np.mean(loss_tem1_list)))
         else:
             for i, batch in pbar:
                 loss_bin, loss_slotname = slu_trainer.train_step(batch)

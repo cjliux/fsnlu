@@ -3,8 +3,8 @@ import os, sys
 import random
 import torch
 import numpy as np
-from models.fscoach.config import add_parser_args
-from models.fscoach.fsinterface2 import eval_model, test_model
+from models.fsbert.config import add_parser_args
+from models.fsbert.interface import eval_model, test_model
 
 
 def parse_args():

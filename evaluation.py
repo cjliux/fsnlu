@@ -2,6 +2,7 @@
 import os, json, sys
 from collections import defaultdict
 
+
 def cal_sentence_acc(file_corr, file_pred):
     assert len(file_corr) == len(file_pred)
 

@@ -19,36 +19,80 @@ def parse_args():
         default="../data/smp2020ecdt/smp2020ecdt_task1_v2")
     parser.add_argument("--save_path", type=str,
         default="./data")
-    parser.add_argument("--key", type=str, default="default")
+    parser.add_argument("--key", type=str, default="default_v2")
     return vars(parser.parse_args())
 
 
 def segment_text_and_label_seq(json_data, labeled=True):
     new_json_data = []
     for item in json_data:
+        # text = ''.join(item["text"].split())
         text = item["text"]
-        val_dic = {}
         if labeled:
+            sv_pairs = []
             for sl, val in item["slots"].items():
                 if not isinstance(val, list):
                     val = [val]
                 for v in val:
-                    text = re.sub(v, " " + v + " ", text)
-                    val_dic[v] = sl
+                    sv_pairs.append((sl, v))
+            sv_pairs = sorted(sv_pairs, key=lambda x: len(x[1]), reverse=True)
 
-        token, label = [], []
-        for seg in text.split():
-            lseg = list(seg)
-            token.extend(lseg)
-            
-            if labeled:
-                if seg in val_dic:
-                    label.extend(['B-' + val_dic[seg]] 
-                        + ['I-' + val_dic[seg]] * (len(lseg) - 1))
+            def search_span(root, sv_pairs):
+                found, index = False, None
+                sl, start, end = None, None, None
+                ist = None
+                for ist in range(len(sv_pairs)):
+                    sl, val = sv_pairs[ist]
+                    regex = "\s*".join(list(''.join(val.split())))
+                    m = re.search(regex, root)
+                    if m is not None:
+                        found = True
+                        start, end = m.start(), m.end()
+                        sv_pairs.pop(ist)
+                        break
+
+                if found:
+                    lhs, mid, rhs = root[:start], root[start:end], root[end:]
+                    node = {"mid": (mid, sl)}
+                    if len(lhs) > 0:
+                        node["lhs"] = search_span(lhs, sv_pairs) 
+                    if len(rhs) > 0:
+                        node["rhs"] = search_span(rhs, sv_pairs)
+                    return node
                 else:
-                    label.extend(['O'] * len(lseg))
-            else:
-                label.extend(['O'] * len(lseg))
+                    return {"mid": (root, None)}
+
+            sp_tree = search_span(text, sv_pairs)
+
+            assert len(sv_pairs) == 0
+
+            def merge_labels(sp_tree):
+                token, label = [], []
+                if "lhs" in sp_tree:
+                    sub_token, sub_label = merge_labels(sp_tree["lhs"])
+                    token.extend(sub_token)
+                    label.extend(sub_label)
+                mid, sl = sp_tree['mid']
+                token.extend(list(mid))
+                if sl is None:
+                    label.extend(['O'] * len(mid))
+                else:
+                    label.extend(['B-' + sl] + ['I-' + sl] * (len(mid)-1))
+                if "rhs" in sp_tree:
+                    sub_token, sub_label = merge_labels(sp_tree["rhs"])
+                    token.extend(sub_token)
+                    label.extend(sub_label)
+                return token, label
+            
+            token, label = merge_labels(sp_tree)
+
+            # check
+            for sl in item["slots"].keys():
+                assert "B-" + sl in label
+        else:
+            token = list(text)
+            label = ['O'] * len(token)
+
         item['token'] = token
         item['label'] = label
 
@@ -129,11 +173,11 @@ def get_vocab_and_labels(train_json, dev_support_dom_json, dev_test_dom_json):
     token_vocab = list(sorted(wfr.keys(), key=lambda x: wfr[x], reverse=True))
 
     token_vocab = ["PAD", "UNK"] + list(sorted(slot2desc.keys())) + token_vocab
-    label_vocab = sorted(lfr.keys(), key=lambda x: x[::-1])
+
     # print(token_vocab)
     # print(label_vocab)
-    print(len(token_vocab), len(label_vocab))
-    return token_vocab, label_vocab, { "dom2slots": dom2slots, 
+    print(len(token_vocab))
+    return token_vocab, { "dom2slots": dom2slots, 
         "slot2desc": slot2desc, "dom2intents": dom2intents, "intent2slots": intent2slots,
         "domint2slots": domint2slots}
 
@@ -217,11 +261,15 @@ def gen_seen_and_unseen(train_dom_json):
 def preprocess_and_save(args):
     train_json, dev_support_dom_json, dev_test_dom_json = read_data(args["data_path"])
     save_dir = os.path.join(args["save_path"], args["key"])
+    os.makedirs(save_dir, exist_ok=True)
 
     # vocab
-    token_vocab, label_vocab, mappings = get_vocab_and_labels(
+    token_vocab, mappings = get_vocab_and_labels(
             train_json, dev_support_dom_json, dev_test_dom_json)
     write_vocab(token_vocab, os.path.join(save_dir, "token_vocab.txt"))
+    label_vocab = ['O']
+    for sl in sorted(mappings["slot2desc"].keys()):
+        label_vocab.extend(['B-' + sl, 'I-' + sl])
     write_vocab(label_vocab, os.path.join(save_dir, "label_vocab.txt"))
     write_vocab(['O', 'B', 'I'], os.path.join(save_dir, "bin_label_vocab.txt"))
     for k, v in mappings.items():

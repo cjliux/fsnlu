@@ -22,29 +22,74 @@ from utils.vocab import Vocab
 
 def segment_text_and_label_seq(item, tokenizer):
     labeled = "slots" in item
+    # text = ''.join(item["text"].split())
     text = item["text"]
-    val_dic = {}
     if labeled:
-        for sl, vals in item["slots"].items():
-            if not isinstance(vals, list):
-                vals = [vals]
-            for v in vals:
-                text = re.sub(v, " " + v + " ", text)
-                val_dic[v] = sl
+        sv_pairs = []
+        for sl, val in item["slots"].items():
+            if not isinstance(val, list):
+                val = [val]
+            for v in val:
+                sv_pairs.append((sl, v))
+        sv_pairs = sorted(sv_pairs, key=lambda x: len(x[1]), reverse=True)
 
-    token, label = [], []
-    for seg in text.split():
-        lseg = list(seg)
-        token.extend(lseg)
-        
-        if labeled:
-            if seg in val_dic:
-                label.extend(['B-' + val_dic[seg]] 
-                    + ['I-' + val_dic[seg]] * (len(lseg) - 1))
+        def search_span(root, sv_pairs):
+            found, index = False, None
+            sl, start, end = None, None, None
+            ist = None
+            for ist in range(len(sv_pairs)):
+                sl, val = sv_pairs[ist]
+                regex = "\s*".join(list(''.join(val.split())))
+                m = re.search(regex, root)
+                if m is not None:
+                    found = True
+                    start, end = m.start(), m.end()
+                    sv_pairs.pop(ist)
+                    break
+
+            if found:
+                lhs, mid, rhs = root[:start], root[start:end], root[end:]
+                node = {"mid": (mid, sl)}
+                if len(lhs) > 0:
+                    node["lhs"] = search_span(lhs, sv_pairs) 
+                if len(rhs) > 0:
+                    node["rhs"] = search_span(rhs, sv_pairs)
+                return node
             else:
-                label.extend(['O'] * len(lseg))
-        else:
-            label.extend(['O'] * len(lseg))
+                return {"mid": (root, None)}
+
+        sp_tree = search_span(text, sv_pairs)
+
+        assert len(sv_pairs) == 0
+
+        def merge_labels(sp_tree):
+            token, label = [], []
+            if "lhs" in sp_tree:
+                sub_token, sub_label = merge_labels(sp_tree["lhs"])
+                token.extend(sub_token)
+                label.extend(sub_label)
+            mid, sl = sp_tree['mid']
+            tok_mid = tokenizer.tokenize(mid)
+            token.extend(tok_mid)
+            if sl is None:
+                label.extend(['O'] * len(tok_mid))
+            else:
+                label.extend(['B-' + sl] + ['I-' + sl] * (len(tok_mid)-1))
+            if "rhs" in sp_tree:
+                sub_token, sub_label = merge_labels(sp_tree["rhs"])
+                token.extend(sub_token)
+                label.extend(sub_label)
+            return token, label
+        
+        token, label = merge_labels(sp_tree)
+
+        # check
+        for sl in item["slots"].keys():
+            assert "B-" + sl in label
+    else:
+        token = list(text)
+        label = ['O'] * len(token)
+
     return token, label
 
 
@@ -77,7 +122,7 @@ def binarize_data(data, tokenizer,
         label_voc, bin_label_voc):
     new_data = []
     for item in data:
-        item['token_ids'] = tokenizer.convert_token_to_ids(item["token"])
+        item['token_ids'] = tokenizer.convert_tokens_to_ids(item["token"])
         item['blabel_ids'] = [bin_label_voc.word2index[tok] for tok in item["bin_label"]]
         item['label_ids'] = [label_voc.word2index[tok] for tok in item["label"]]
         

@@ -4,8 +4,8 @@ import torch
 import random
 import numpy as np
 
-from models.fscoach.config import add_parser_args
-from models.fscoach.fsinterface2 import train_model, eval_model
+from models.fsbert.config import add_parser_args
+from models.fsbert.interface import train_model
 
 
 def parse_args():

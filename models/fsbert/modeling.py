@@ -1359,17 +1359,17 @@ class BertForTaskNLU(BertPreTrainedModel):
     """BERT model for Task-Orient NLU ."""
     def __init__(self, config, output_attentions=False, keep_multihead_output=False, *inputs, **kwargs):
         label_list = kwargs['label_list']
-        super(BertForTaskNLU, self).__init__(config)
+        super().__init__(config)
         self.domain_num = len(label_list["domain"])
         self.intent_num = len(label_list["intent"])
         self.slots_num = len(label_list["slots"])
-        self.max_seq_length = kwargs['max_seq_len']
+        self.label_vocab = label_list["label_vocab"]
         self.bert = BertModel(config, output_attentions=output_attentions,
                                       keep_multihead_output=keep_multihead_output)
         self.hidden_size = config.hidden_size
         self.domain_outputs = nn.Linear(config.hidden_size, self.domain_num)
         self.intent_outputs = nn.Linear(config.hidden_size, self.intent_num)
-        self.slots_outputs = nn.Linear(config.hidden_size, self.slots_num)
+        self.slots_outputs = nn.Linear(config.hidden_size, self.label_vocab.n_words)
         self.dropout = nn.Dropout(p = 0.1)
         self.apply(self.init_bert_weights)
 
@@ -1384,8 +1384,9 @@ class BertForTaskNLU(BertPreTrainedModel):
         domain_logits = self.domain_outputs(cls_output)
         intent_logits = self.intent_outputs(cls_output)
 
-        sequence_output = sequence_output.view(-1, self.hidden_size)
+        # sequence_output = sequence_output.view(-1, self.hidden_size)
         slots_logits = self.slots_outputs(sequence_output)
-        slots_logits = slots_logits.view(-1, self.max_seq_length, self.slots_num)
+        # slots_logits = slots_logits.view(-1, self.max_seq_length, self.slots_num)
 
         return domain_logits, intent_logits, slots_logits
+
