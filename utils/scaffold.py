@@ -56,19 +56,22 @@ def init_logger(filepath):
     return logger
 
 
-def get_output_dir(save_path, exp_name, exp_id):
+def get_output_dir(save_path, exp_name, exp_id, random_gen=False):
     """
     create a directory to store the experiment
     """
     exp_path = os.path.join(save_path, exp_name)
         
     # generate id for this experiment
-    if exp_id == "":
-        chars = "0123456789"
-        while True:
-            exp_id = "".join(random.choice(chars) for _ in range(0, 3))
-            if not os.path.exists(os.path.join(exp_path, exp_id)):
-                break
+    if exp_id is None or exp_id == "":
+        if random_gen:
+            chars = "0123456789"
+            while True:
+                exp_id = "".join(random.choice(chars) for _ in range(0, 3))
+                if not os.path.exists(os.path.join(exp_path, exp_id)):
+                    break
+        else:
+            exp_id = "default"
     
     # update dump_path
     save_path = os.path.join(exp_path, exp_id)

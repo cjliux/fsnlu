@@ -1,6 +1,7 @@
 # -*- coding -*-
 # Copyright: WANG Hongru
 # Time 2020 06 17 11 am
+import os, sys
 import json
 from collections import OrderedDict
 
@@ -76,8 +77,8 @@ def eva_for_each():
     data_pred = []
     data_corr = []
     for i in range(5):
-        test_file = DATA_PATH + 'few-shot/test/test_' + str(i) + '.json'
-        predict_file = 'result' + '/predict_' + str(i) + '.json'
+        test_file = os.path.join(DATA_PATH, 'test.labeled/correct_' + str(i) + '.json')
+        predict_file = os.path.join(DATA_PATH, 'predict' + '/predict_' + str(i) + '.json')
         
         test_data = json.load(open(test_file, encoding='utf-8'), object_pairs_hook=OrderedDict)
         predict_data = json.load(open(predict_file, encoding='utf-8'), object_pairs_hook=OrderedDict)
@@ -89,7 +90,7 @@ def eva_for_each():
 
 
 if __name__ == "__main__":
-    DATA_PATH = "data/v2/"
+    DATA_PATH = "../data/smp2020ecdt/smp2020ecdt_task1_v2/dev"
     
     """
     # the predict result file path
@@ -114,3 +115,4 @@ if __name__ == "__main__":
     
     print("==========Slot F1==========================")
     print(cal_slot_f1(data_corr, data_pred))
+    

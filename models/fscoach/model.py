@@ -134,7 +134,7 @@ class IntentPredictor(nn.Module):
 
 
 class SlotNamePredictor(nn.Module):
-    def __init__(self, params):
+    def __init__(self, params, vocab, embed):
         super(SlotNamePredictor, self).__init__()
         self.input_dim = params.hidden_dim * 2 if params.bidirection else params.hidden_dim
         self.enc_type = params.enc_type
@@ -143,13 +143,17 @@ class SlotNamePredictor(nn.Module):
         elif self.enc_type == "lstm":
             self.lstm_enc = nn.LSTM(self.input_dim, params.trs_hidden_dim//2, num_layers=params.trs_layers, bidirectional=True, batch_first=True)
         
-        with open(params.slot_emb_file, "rb") as fd:
-            self.slot_embs = pickle.load(fd)
+        # with open(params.slot_emb_file, "rb") as fd:
+        #     self.slot_embs = pickle.load(fd)
     
         self.domain_set = Vocab.from_file(os.path.join(params.data_path, "domains.txt"))
+        # self.slot_set = Vocab.from_file(os.path.join(params.data_path, "slots.txt"))
         with open(os.path.join(params.data_path, "dom2slots.json"), 'r', encoding='utf8') as fd:
             self.domain2slot = json.load(fd)
         self.y2_set = Vocab.from_file(os.path.join(params.data_path, "label_vocab.txt"))
+        
+        self.vocab = vocab
+        self.embed = [embed]
 
     def forward(self, domains, hidden_layers, binary_preditions=None, binary_golds=None, final_golds=None):
         """
@@ -272,8 +276,11 @@ class SlotNamePredictor(nn.Module):
         for i in range(bsz):
             dm_id = domains[i]
             domain_name = self.domain_set[dm_id]
+            slot_list_based_domain = self.domain2slot[domain_name]
+            slid_based_domain = torch.LongTensor([self.vocab.word2index[nm] for nm in slot_list_based_domain]).cuda()
             
-            slot_embs_based_domain = torch.FloatTensor(self.slot_embs[domain_name]).transpose(0,1).cuda()   # (emb_dim, slot_num)
+            slot_embs_based_domain = self.embed[0](slid_based_domain).t()
+            # slot_embs_based_domain = torch.FloatTensor(self.slot_embs[domain_name]).transpose(0,1).cuda()   # (emb_dim, slot_num)
 
             feature_each_sample = feature_list[i]  # (num_slotname, hidden_dim)  hidden_dim == emb_dim
             if len(feature_each_sample) == 0:

@@ -19,7 +19,8 @@ from scipy import sparse
 
 from utils.vocab import Vocab
 
-def segment_text_and_label_seq(item):
+
+def segment_text_and_label_seq(item, tokenizer):
     labeled = "slots" in item
     text = item["text"]
     val_dic = {}
@@ -47,8 +48,8 @@ def segment_text_and_label_seq(item):
     return token, label
 
 
-def preprocess_item(item, use_tr=False, slot_list=None):
-    tokens, l2_list = segment_text_and_label_seq(item)
+def preprocess_item(item, tokenizer):
+    tokens, l2_list = segment_text_and_label_seq(item, tokenizer)
     item['token'], item['label'] = tokens, l2_list
 
     l1_list = []
@@ -61,75 +62,40 @@ def preprocess_item(item, use_tr=False, slot_list=None):
             l1_list.append("O")
     item["bin_label"] = l1_list
 
-    if use_tr:
-        """
-        template_each_sample[0] is correct template
-        template_each_sample[1] and template_each_sample[2] are incorrect template (replace correct slots with other slots)
-        """
-        templates = [[],[],[]]
-        assert len(tokens) == len(l2_list)
-        for token, l2 in zip(tokens, l2_list):
-            if "I" in l2: continue
-            if l2 == "O":
-                templates[0].append(token)
-                templates[1].append(token)
-                templates[2].append(token)
-            else:
-                # "B" in l2
-                slot_name = l2.split("-")[1]
-                templates[0].append(slot_name)
-                np.random.shuffle(slot_list.get_vocab())
-                idx = 0
-                for j in range(1, 3):  # j from 1 to 2
-                    if slot_list[idx] != slot_name:
-                        templates[j].append(slot_list[idx])
-                    else:
-                        idx = idx + 1
-                        templates[j].append(slot_list[idx])
-                    idx = idx + 1
-                
-        assert len(templates[0]) == len(templates[1]) == len(templates[2])
-
-        item["templates"] = templates
     return item
 
 
-def read_data(filepath, use_tr=False, slot_list=None):
+def read_data(filepath, tokenizer):
     with open(filepath, "r", encoding='utf8') as fd:
         json_data = json.load(fd)
-    data = [preprocess_item(item, use_tr, slot_list) for item in json_data]
+    data = [preprocess_item(item, tokenizer) for item in json_data]
     return data
 
 
-def binarize_data(data, vocab, use_tr=False, 
-        domains=None, label_voc=None, bin_label_voc=None, intents=None):    
+def binarize_data(data, tokenizer, 
+        domain_map, intent_map, slots_map, 
+        label_voc, bin_label_voc):
     new_data = []
     for item in data:
-        item['utter'] = [vocab.word2index[tok] for tok in item["token"]]
-        item['y1'] = [bin_label_voc.word2index[tok] for tok in item["bin_label"]]
-        item['y2'] = [label_voc.word2index[tok] for tok in item["label"]]
-        item['dom_idx'] = domains.word2index[item['domain']]
+        item['token_ids'] = tokenizer.convert_token_to_ids(item["token"])
+        item['blabel_ids'] = [bin_label_voc.word2index[tok] for tok in item["bin_label"]]
+        item['label_ids'] = [label_voc.word2index[tok] for tok in item["label"]]
+        
+        item['dom_idx'] = domain_map.word2index[item['domain']]
         if "intent" in item:
-            item['int_idx'] = intents.word2index[item['intent']]
+            item['int_idx'] = intent_map.word2index[item['intent']]
 
-        if use_tr:
-            templs = [[],[],[]]
-            for tok1, tok2, tok3 in zip(*item["templates"]):
-                templs[0].append(vocab.word2index[tok1])
-                templs[1].append(vocab.word2index[tok2])
-                templs[2].append(vocab.word2index[tok3])
-            item["templs"] = templs
         new_data.append(item)
     return new_data
 
 
 def read_all_train_data(
-        train_data_file, slot_list, vocab, 
-        domain_set, label_voc, bin_label_voc,
-        intent_set, use_tr=False):
+        train_data_file, tokenizer,
+        domain_map, intent_map, slots_map, 
+        label_voc, bin_label_voc):
     logger.info("Loading and processing train data ...")
 
-    train_data = read_data(train_data_file, use_tr, slot_list)
+    train_data = read_data(train_data_file, tokenizer)
     train_dom_data = defaultdict(list)
     for item in train_data:
         train_dom_data[item['domain']].append(item)
@@ -137,15 +103,15 @@ def read_all_train_data(
     # binarize data
     data = {}
     for dom, dom_data in train_dom_data.items():
-        data[dom] = binarize_data(dom_data, vocab, 
-            use_tr, domain_set, label_voc, bin_label_voc, intent_set)
+        data[dom] = binarize_data(dom_data, tokenizer,
+            domain_map, intent_map, slots_map, label_voc, bin_label_voc)
     return data
 
 
 def read_dev_support_and_query_data(
-        dev_data_path, slot_list, vocab, 
-        domain_set, label_voc, bin_label_voc,
-        intent_set, use_tr=False):
+        dev_data_path, tokenizer,
+        domain_map, intent_map, slots_map, 
+        label_voc, bin_label_voc):
     logger.info("Loading and processing dev data ...")
 
     sup_dir = os.path.join(dev_data_path, "support")
@@ -154,15 +120,15 @@ def read_dev_support_and_query_data(
     for sup_file in sup_files:
         i_dom = sup_file[sup_file.index('_')+1:sup_file.rindex('.')]
         dom_data = read_data(
-            os.path.join(sup_dir, sup_file), use_tr, slot_list)
-        sup_dom_data[i_dom] = binarize_data(dom_data, vocab, 
-            use_tr, domain_set, label_voc, bin_label_voc, intent_set)
+            os.path.join(sup_dir, sup_file), tokenizer)
+        sup_dom_data[i_dom] = binarize_data(dom_data, tokenizer,
+            domain_map, intent_map, slots_map, label_voc, bin_label_voc)
 
         dom_data = read_data(
             os.path.join(dev_data_path, "test", "test_{}.json".format(i_dom)),
-            use_tr, slot_list)
-        qry_dom_data[i_dom] = binarize_data(dom_data, vocab, 
-            use_tr, domain_set, label_voc, bin_label_voc, intent_set)
+            tokenizer)
+        qry_dom_data[i_dom] = binarize_data(dom_data, tokenizer, 
+            domain_map, intent_map, slots_map, label_voc, bin_label_voc)
 
     return sup_dom_data, qry_dom_data
 
@@ -274,7 +240,7 @@ class Dataset(thdata.Dataset):
         return qry_inst
 
 
-def collate_fn(batch, is_sup=False, PAD_INDEX=0):
+def collate_fn(batch, PAD_INDEX=0):
     batch_size = len(batch)
 
     new_batch = {k:[] for k in batch[0].keys()}
@@ -285,34 +251,25 @@ def collate_fn(batch, is_sup=False, PAD_INDEX=0):
 
     batch["model_input"] = {} # tensorized
 
-    lengths = [len(bs_x) for bs_x in batch['utter']]
-    max_lengths = max(lengths)
-    padded_seqs = torch.LongTensor(batch_size, max_lengths).fill_(PAD_INDEX)
-    for i, seq in enumerate(batch['utter']):
-        length = lengths[i]
-        padded_seqs[i, :length] = torch.LongTensor(seq)
-    lengths = torch.LongTensor(lengths)
+    def pad_and_batch(in_seqs):
+        lengths = [len(bs_x) for bs_x in in_seqs]
+        max_lengths = max(lengths)
+        padded_seqs = torch.LongTensor(batch_size, max_lengths).fill_(PAD_INDEX)
+        for i, seq in enumerate(in_seqs):
+            padded_seqs[i, :lengths[i]] = torch.LongTensor(seq)
+        lengths = torch.LongTensor(lengths)
+        return padded_seqs, lengths
 
+    padded_seqs, lengths = pad_and_batch(batch["token_ids"])
     batch["model_input"]["padded_seqs"] = padded_seqs
-    batch["model_input"]["lengths"] = lengths
+    batch["model_input"]["seq_lengths"] = lengths
 
-    batch["model_input"]["domains"] = torch.LongTensor(batch["dom_idx"])
+    padded_y, _ = pad_and_batch(batch["label_ids"])
+    batch["model_input"]["padded_y"] = padded_y
+
+    batch["model_input"]["dom_idx"] = torch.LongTensor(batch["dom_idx"])
     if "int_idx" in batch:
-        batch["model_input"]["intents"] = torch.LongTensor(batch["int_idx"])
-
-    if "templs" in batch:
-        tem_lengths = [len(tem[0]) for tem in batch["templs"]]
-        max_tem_len = max(tem_lengths)
-        padded_templates = torch.LongTensor(batch_size, 3, max_tem_len).fill_(PAD_INDEX)
-        for j, tem in enumerate(batch["templs"]):
-            length = tem_lengths[j]
-            padded_templates[j, 0, :length] = torch.LongTensor(tem[0])
-            padded_templates[j, 1, :length] = torch.LongTensor(tem[1])
-            padded_templates[j, 2, :length] = torch.LongTensor(tem[2])
-        tem_lengths = torch.LongTensor(tem_lengths)
-
-        batch["model_input"]["padded_templates"] = padded_templates
-        batch["model_input"]["tem_lengths"] = tem_lengths
+        batch["model_input"]["int_idx"] = torch.LongTensor(batch["int_idx"])
 
     # recursive
     if "support" in batch:
@@ -326,25 +283,22 @@ def collate_fn(batch, is_sup=False, PAD_INDEX=0):
 
 def get_dataloader_for_fs_train(
         data_path, raw_data_path, eval_domains: list, 
-        batch_size, use_tr, n_shots):
-    domain_set = Vocab.from_file(os.path.join(data_path, "domains.txt"))
-    intent_set = Vocab.from_file(os.path.join(data_path, "intents.txt"))
-    slot_list = Vocab.from_file(os.path.join(data_path, "slots.txt"))
-    vocab = Vocab.from_file(os.path.join(data_path, "token_vocab.txt"))
+        batch_size, n_shots, tokenizer):
+    domain_map = Vocab.from_file(os.path.join(data_path, "domains.txt"))
+    intent_map = Vocab.from_file(os.path.join(data_path, "intents.txt"))
+    slots_map = Vocab.from_file(os.path.join(data_path, "slots.txt"))
     label_vocab = Vocab.from_file(os.path.join(data_path, "label_vocab.txt"))
     bin_label_vocab = Vocab.from_file(os.path.join(data_path, "bin_label_vocab.txt"))
 
     # train 
     all_train_data = read_all_train_data(
-        os.path.join(raw_data_path, "source.json"), 
-        slot_list, vocab, domain_set, 
-        label_vocab, bin_label_vocab, intent_set, use_tr)
+        os.path.join(raw_data_path, "source.json"), tokenizer,
+        domain_map, intent_map, slots_map, label_vocab, bin_label_vocab)
     data = {k:v for k,v in all_train_data.items() if k not in eval_domains}
     
     ## wrap dataset
     fs_data = []
     for dom, dom_data in data.items():
-        # fs_data[dom] = collect_support_instances(dom_data, dom_data, n_shots)
         sup_data, qry_data = separate_data_to_support_and_query(dom_data, 2*int(n_shots))
         dom_data = collect_support_instances(sup_data, qry_data, int(n_shots))
         fs_data.extend(dom_data)
@@ -356,19 +310,17 @@ def get_dataloader_for_fs_train(
 
 def get_dataloader_for_fs_eval(
         data_path, raw_data_path, eval_domains: list,
-        batch_size, use_tr, n_shots):
-    domain_set = Vocab.from_file(os.path.join(data_path, "domains.txt"))
-    intent_set = Vocab.from_file(os.path.join(data_path, "intents.txt"))
-    slot_list = Vocab.from_file(os.path.join(data_path, "slots.txt"))
-    vocab = Vocab.from_file(os.path.join(data_path, "token_vocab.txt"))
+        batch_size, n_shots, tokenizer):
+    domain_map = Vocab.from_file(os.path.join(data_path, "domains.txt"))
+    intent_map = Vocab.from_file(os.path.join(data_path, "intents.txt"))
+    slots_map = Vocab.from_file(os.path.join(data_path, "slots.txt"))
     label_vocab = Vocab.from_file(os.path.join(data_path, "label_vocab.txt"))
     bin_label_vocab = Vocab.from_file(os.path.join(data_path, "bin_label_vocab.txt"))
 
     # train 
     all_train_data = read_all_train_data(
-        os.path.join(raw_data_path, "source.json"), 
-        slot_list, vocab, domain_set, 
-        label_vocab, bin_label_vocab, intent_set, use_tr)
+        os.path.join(raw_data_path, "source.json"), tokenizer,
+        domain_map, intent_map, slots_map, label_vocab, bin_label_vocab)
     data = {k:v for k,v in all_train_data.items() if k in eval_domains}
 
     # eval support & query
@@ -384,19 +336,18 @@ def get_dataloader_for_fs_eval(
 
 
 def get_dataloader_for_fs_test(
-        data_path, raw_data_path, 
-        batch_size, use_tr, n_shots, sep_dom=False):
-    domain_set = Vocab.from_file(os.path.join(data_path, "domains.txt"))
-    intent_set = Vocab.from_file(os.path.join(data_path, "intents.txt"))
-    slot_list = Vocab.from_file(os.path.join(data_path, "slots.txt"))
-    vocab = Vocab.from_file(os.path.join(data_path, "token_vocab.txt"))
+        data_path, raw_data_path,
+        batch_size, n_shots, tokenizer, sep_dom=False):
+    domain_map = Vocab.from_file(os.path.join(data_path, "domains.txt"))
+    intent_map = Vocab.from_file(os.path.join(data_path, "intents.txt"))
+    slots_map = Vocab.from_file(os.path.join(data_path, "slots.txt"))
     label_vocab = Vocab.from_file(os.path.join(data_path, "label_vocab.txt"))
     bin_label_vocab = Vocab.from_file(os.path.join(data_path, "bin_label_vocab.txt"))
 
     ## dev support & query
     dev_sup_dom_data, dev_qry_dom_data = read_dev_support_and_query_data(
-        os.path.join(raw_data_path, "dev"), slot_list, vocab, 
-        domain_set, label_vocab, bin_label_vocab, intent_set, use_tr)
+        os.path.join(raw_data_path, "dev"), tokenizer,
+        domain_map, intent_map, slots_map, label_vocab, bin_label_vocab)
 
     if not sep_dom:
         fs_data = []

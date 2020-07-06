@@ -111,19 +111,17 @@ class SLUTrainer(object):
             if self.params.tr:
                 sup_tem, sup_tlens = sup_input["padded_templates"].cuda(), sup_input["tem_lengths"].cuda()
 
+            sup_loss = 0
+
             bin_preds, lstm_hiddens = self.binary_slu_tagger(sup_X)
 
             logits_int = self.intent_predictor(lstm_hiddens, sup_lens)
             loss_int = self.loss_fn(logits_int, sup_int)
-            self.optimizer.zero_grad()
-            loss_int.backward(retain_graph=True)
-            self.optimizer.step()
+            sup_loss += loss_int
 
             ## optimize binary_slu_tagger
             loss_bin = self.binary_slu_tagger.crf_loss(bin_preds, sup_lens, sup_ybin)
-            self.optimizer.zero_grad()
-            loss_bin.backward(retain_graph=True)
-            self.optimizer.step()
+            sup_loss += loss_bin
 
             ## optimize slotname_predictor
             pred_slotname_list, gold_slotname_list = self.slotname_predictor(
@@ -133,12 +131,7 @@ class SLUTrainer(object):
                 assert pred_slotname_each_sample.size()[0] == gold_slotname_each_sample.size()[0]
                 if pred_slotname_each_sample.size(0) == 0: continue
                 loss_slotname = self.loss_fn(pred_slotname_each_sample, gold_slotname_each_sample.cuda())
-                self.optimizer.zero_grad()
-                if j_sam == sup_X.size(0) - 1 and not self.use_label_encoder:
-                    loss_slotname.backward()
-                else:
-                    loss_slotname.backward(retain_graph=True)
-                self.optimizer.step()
+                sup_loss += loss_slotname
 
             if self.use_label_encoder:
                 templates_repre, input_repre = self.sent_repre_generator(
@@ -150,14 +143,7 @@ class SLUTrainer(object):
                 template2_loss = -1 * self.loss_fn_mse(templates_repre[:, 2, :], input_repre)
                 input_repre.requires_grad = True
 
-                self.optimizer.zero_grad()
-                template0_loss.backward(retain_graph=True)
-                template1_loss.backward(retain_graph=True)
-                if epoch <= 3:
-                    template2_loss.backward()
-                else:
-                    template2_loss.backward(retain_graph=True)
-                self.optimizer.step()
+                sup_loss += template0_loss + template1_loss + template2_loss
 
                 if epoch > 3:
                     templates_repre = templates_repre.detach()
@@ -166,13 +152,12 @@ class SLUTrainer(object):
                     input_loss2 = -1 * self.loss_fn_mse(input_repre, templates_repre[:, 2, :])
                     templates_repre.requires_grad = True
 
-                    self.optimizer.zero_grad()
-                    input_loss0.backward(retain_graph=True)
-                    input_loss1.backward(retain_graph=True)
-                    # input_loss2.backward(retain_graph=True)
-                    input_loss2.backward()
-                    self.optimizer.step()
+                    sup_loss += input_loss0 + input_loss1 + input_loss2
             
+            self.optimizer.zero_grad()
+            sup_loss.backward(retain_graph=True)
+            self.optimizer.step()
+
             ## qry
             X_sam, len_sam = X[i_sam:i_sam+1], lengths[i_sam:i_sam+1]
             ybin_sam, yfin_sam, ydm_sam = y_bin[i_sam:i_sam+1], y_final[i_sam:i_sam+1], y_dm[i_sam:i_sam+1]
@@ -188,9 +173,6 @@ class SLUTrainer(object):
 
             loss_bin = self.binary_slu_tagger.crf_loss(bin_preds, len_sam, ybin_sam)
             meta_loss += loss_bin
-            # self.optimizer.zero_grad()
-            # loss_bin.backward(retain_graph=True)
-            # self.optimizer.step()
 
             pred_slotname_list, gold_slotname_list = self.slotname_predictor(
                 ydm_sam, lstm_hiddens, binary_golds=ybin_sam, final_golds=yfin_sam)
@@ -200,9 +182,6 @@ class SLUTrainer(object):
                 if pred_slotname_each_sample.size(0) == 0: continue
                 loss_slotname = self.loss_fn(pred_slotname_each_sample, gold_slotname_each_sample.cuda())
                 meta_loss += loss_slotname
-                # self.optimizer.zero_grad()
-                # loss_slotname.backward(retain_graph=True)
-                # self.optimizer.step()
 
             if self.use_label_encoder:
                 templates_repre, input_repre = self.sent_repre_generator(
@@ -215,11 +194,6 @@ class SLUTrainer(object):
                 input_repre.requires_grad = True
 
                 meta_loss += template0_loss + template1_loss + template2_loss
-                # self.optimizer.zero_grad()
-                # template0_loss.backward(retain_graph=True)
-                # template1_loss.backward(retain_graph=True)
-                # template2_loss.backward(retain_graph=True)
-                # self.optimizer.step()
 
                 if epoch > 3:
                     templates_repre = templates_repre.detach()
@@ -229,11 +203,8 @@ class SLUTrainer(object):
                     templates_repre.requires_grad = True
 
                     meta_loss += input_loss0 + input_loss1 + input_loss2
-                    # self.optimizer.zero_grad()
-                    # input_loss0.backward(retain_graph=True)
-                    # input_loss1.backward(retain_graph=True)
-                    # input_loss2.backward(retain_graph=True)
-                    # self.optimizer.step()
+
+            meta_loss += 0.2 * sup_loss
 
             self.binary_slu_tagger.load_state_dict(slutagger_snapshot)
             self.slotname_predictor.load_state_dict(slnmpred_snapshot)
@@ -288,19 +259,17 @@ class SLUTrainer(object):
                 if self.params.tr:
                     sup_tem, sup_tlens = sup_input["padded_templates"].cuda(), sup_input["tem_lengths"].cuda()
 
+                sup_loss = 0
+
                 bin_preds, lstm_hiddens = self.binary_slu_tagger(sup_X)
 
                 logits_int = self.intent_predictor(lstm_hiddens, sup_lens)
                 loss_int = self.loss_fn(logits_int, sup_int)
-                self.optimizer.zero_grad()
-                loss_int.backward(retain_graph=True)
-                self.optimizer.step()
+                sup_loss += loss_int
 
                 ## optimize binary_slu_tagger
                 loss_bin = self.binary_slu_tagger.crf_loss(bin_preds, sup_lens, sup_ybin)
-                self.optimizer.zero_grad()
-                loss_bin.backward(retain_graph=True)
-                self.optimizer.step()
+                sup_loss += loss_bin
 
                 ## optimize slotname_predictor
                 pred_slotname_list, gold_slotname_list = self.slotname_predictor(
@@ -310,12 +279,7 @@ class SLUTrainer(object):
                     assert pred_slotname_each_sample.size()[0] == gold_slotname_each_sample.size()[0]
                     if pred_slotname_each_sample.size(0) == 0: continue
                     loss_slotname = self.loss_fn(pred_slotname_each_sample, gold_slotname_each_sample.cuda())
-                    self.optimizer.zero_grad()
-                    if j_sam == sup_X.size(0) - 1 and not self.use_label_encoder:
-                        loss_slotname.backward()
-                    else:
-                        loss_slotname.backward(retain_graph=True)
-                    self.optimizer.step()
+                    sup_loss += loss_slotname
 
                 if self.use_label_encoder:
                     templates_repre, input_repre = self.sent_repre_generator(
@@ -327,11 +291,11 @@ class SLUTrainer(object):
                     template2_loss = -1 * self.loss_fn_mse(templates_repre[:, 2, :], input_repre)
                     input_repre.requires_grad = True
 
-                    self.optimizer.zero_grad()
-                    template0_loss.backward(retain_graph=True)
-                    template1_loss.backward(retain_graph=True)
-                    template2_loss.backward()
-                    self.optimizer.step()
+                    sup_loss += template0_loss + template1_loss + template2_loss
+
+                self.optimizer.zero_grad()
+                sup_loss.backward()
+                self.optimizer.step()
 
                 # qry
                 self.binary_slu_tagger.eval()
@@ -503,19 +467,17 @@ class SLUTrainer(object):
                 if self.params.tr:
                     sup_tem, sup_tlens = sup_input["padded_templates"].cuda(), sup_input["tem_lengths"].cuda()
 
+                sup_loss = 0
+
                 bin_preds, lstm_hiddens = self.binary_slu_tagger(sup_X)
 
                 logits_int = self.intent_predictor(lstm_hiddens, sup_lens)
                 loss_int = self.loss_fn(logits_int, sup_int)
-                self.optimizer.zero_grad()
-                loss_int.backward(retain_graph=True)
-                self.optimizer.step()
+                sup_loss += loss_int
 
                 ## optimize binary_slu_tagger
                 loss_bin = self.binary_slu_tagger.crf_loss(bin_preds, sup_lens, sup_ybin)
-                self.optimizer.zero_grad()
-                loss_bin.backward(retain_graph=True)
-                self.optimizer.step()
+                sup_loss += loss_bin
 
                 ## optimize slotname_predictor
                 pred_slotname_list, gold_slotname_list = self.slotname_predictor(
@@ -525,12 +487,7 @@ class SLUTrainer(object):
                     assert pred_slotname_each_sample.size()[0] == gold_slotname_each_sample.size()[0]
                     if pred_slotname_each_sample.size(0) == 0: continue
                     loss_slotname = self.loss_fn(pred_slotname_each_sample, gold_slotname_each_sample.cuda())
-                    self.optimizer.zero_grad()
-                    if j_sam == sup_X.size(0) - 1 and not self.use_label_encoder:
-                        loss_slotname.backward()
-                    else:
-                        loss_slotname.backward(retain_graph=True)
-                    self.optimizer.step()
+                    sup_loss += loss_slotname
 
                 if self.use_label_encoder:
                     templates_repre, input_repre = self.sent_repre_generator(
@@ -542,11 +499,11 @@ class SLUTrainer(object):
                     template2_loss = -1 * self.loss_fn_mse(templates_repre[:, 2, :], input_repre)
                     input_repre.requires_grad = True
 
-                    self.optimizer.zero_grad()
-                    template0_loss.backward(retain_graph=True)
-                    template1_loss.backward(retain_graph=True)
-                    template2_loss.backward()
-                    self.optimizer.step()
+                    sup_loss += template0_loss + template1_loss + template2_loss
+
+                self.optimizer.zero_grad()
+                sup_loss.backward()
+                self.optimizer.step()
 
                 # qry
                 self.binary_slu_tagger.eval()
