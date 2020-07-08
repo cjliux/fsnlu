@@ -95,6 +95,13 @@ def segment_text_and_label_seq(item, tokenizer):
 
 def preprocess_item(item, tokenizer):
     tokens, l2_list = segment_text_and_label_seq(item, tokenizer)
+    
+    # to bert style
+    tokens.insert(0, '[CLS]')
+    l2_list.insert(0, 'O')
+    tokens.append('[SEP]')
+    l2_list.append('O')
+
     item['token'], item['label'] = tokens, l2_list
 
     l1_list = []
@@ -284,6 +291,10 @@ class Dataset(thdata.Dataset):
         qry_inst = self.qry_data[index]
         return qry_inst
 
+    def merge(self, rhs_data):
+        data = self.qry_data + rhs_data.qry_data
+        return Dataset(data)
+
 
 def collate_fn(batch, PAD_INDEX=0):
     batch_size = len(batch)
@@ -291,7 +302,10 @@ def collate_fn(batch, PAD_INDEX=0):
     new_batch = {k:[] for k in batch[0].keys()}
     for item in batch:
         for k in new_batch.keys():
-            new_batch[k].append(item[k])
+            if k in item:
+                new_batch[k].append(item[k])
+            # else:
+            #     logger.info("Warnings: support batch missing.")
     batch = new_batch
 
     batch["model_input"] = {} # tensorized
@@ -326,9 +340,15 @@ def collate_fn(batch, PAD_INDEX=0):
     return batch
 
 
+def get_dataloader(dataset, batch_size, shuffle):
+    loader = thdata.DataLoader(dataset=dataset, 
+        batch_size=batch_size, shuffle=shuffle, collate_fn=collate_fn)
+    return loader
+
+
 def get_dataloader_for_fs_train(
         data_path, raw_data_path, eval_domains: list, 
-        batch_size, n_shots, tokenizer):
+        batch_size, sup_ratio, n_shots, tokenizer, return_suploader=False):
     domain_map = Vocab.from_file(os.path.join(data_path, "domains.txt"))
     intent_map = Vocab.from_file(os.path.join(data_path, "intents.txt"))
     slots_map = Vocab.from_file(os.path.join(data_path, "slots.txt"))
@@ -343,19 +363,28 @@ def get_dataloader_for_fs_train(
     
     ## wrap dataset
     fs_data = []
+    fs_sup_data = []
     for dom, dom_data in data.items():
-        sup_data, qry_data = separate_data_to_support_and_query(dom_data, 2*int(n_shots))
+        sup_size = max(int(sup_ratio * len(dom_data)), n_shots)
+        sup_data, qry_data = separate_data_to_support_and_query(dom_data, sup_size)
         dom_data = collect_support_instances(sup_data, qry_data, int(n_shots))
         fs_data.extend(dom_data)
+        if return_suploader:
+            fs_sup_data.extend(sup_data)
 
     dataloader = thdata.DataLoader(dataset=Dataset(fs_data), 
         batch_size=batch_size, shuffle=True, collate_fn=collate_fn)
-    return dataloader
+    if return_suploader:
+        suploader = thdata.DataLoader(dataset=Dataset(fs_sup_data), 
+            batch_size=batch_size, shuffle=True, collate_fn=collate_fn)
+        return dataloader, suploader
+    else:
+        return dataloader
 
 
 def get_dataloader_for_fs_eval(
         data_path, raw_data_path, eval_domains: list,
-        batch_size, n_shots, tokenizer):
+        batch_size, sup_ratio, n_shots, tokenizer, return_suploader=False):
     domain_map = Vocab.from_file(os.path.join(data_path, "domains.txt"))
     intent_map = Vocab.from_file(os.path.join(data_path, "intents.txt"))
     slots_map = Vocab.from_file(os.path.join(data_path, "slots.txt"))
@@ -370,19 +399,29 @@ def get_dataloader_for_fs_eval(
 
     # eval support & query
     fs_data = []
+    fs_sup_data = []
     for dom, dom_data in data.items():
-        sup_data, qry_data = separate_data_to_support_and_query(dom_data, 2*int(n_shots))
+        sup_size = max(int(sup_ratio * len(dom_data)), n_shots)
+        sup_data, qry_data = separate_data_to_support_and_query(dom_data, sup_size)
         dom_data = collect_support_instances(sup_data, qry_data, int(n_shots))
         fs_data.extend(dom_data)
+        if return_suploader:
+            fs_sup_data.extend(sup_data)
 
     dataloader = thdata.DataLoader(dataset=Dataset(fs_data), 
         batch_size=batch_size, shuffle=False, collate_fn=collate_fn)
-    return dataloader
+    if return_suploader:
+        suploader = thdata.DataLoader(dataset=Dataset(fs_sup_data), 
+            batch_size=batch_size, shuffle=True, collate_fn=collate_fn)
+        return dataloader, suploader
+    else:
+        return dataloader
 
 
 def get_dataloader_for_fs_test(
         data_path, raw_data_path,
-        batch_size, n_shots, tokenizer, sep_dom=False):
+        batch_size, n_shots, tokenizer, 
+        sep_dom=False, return_suploader=False):
     domain_map = Vocab.from_file(os.path.join(data_path, "domains.txt"))
     intent_map = Vocab.from_file(os.path.join(data_path, "intents.txt"))
     slots_map = Vocab.from_file(os.path.join(data_path, "slots.txt"))
@@ -396,23 +435,38 @@ def get_dataloader_for_fs_test(
 
     if not sep_dom:
         fs_data = []
+        fs_sup_data = []
         for dom in dev_sup_dom_data.keys():
             dom_data = collect_support_instances(
                 dev_sup_dom_data[dom], dev_qry_dom_data[dom], int(n_shots))
             fs_data.extend(dom_data)
+            if return_suploader:
+                fs_sup_data.extend(dev_sup_dom_data[dom])
 
         dataloader = thdata.DataLoader(dataset=Dataset(fs_data), 
             batch_size=batch_size, shuffle=False, collate_fn=collate_fn)
-        return dataloader
+        if return_suploader:
+            suploader = thdata.DataLoader(dataset=Dataset(fs_sup_data), 
+                batch_size=batch_size, shuffle=True, collate_fn=collate_fn)
+            return dataloader, suploader
+        else:
+            return dataloader
     else:
         dataloaders = {}
+        suploaders = {}
         for dom in dev_sup_dom_data.keys():
             dom_data = collect_support_instances(
                 dev_sup_dom_data[dom], dev_qry_dom_data[dom], int(n_shots))
             
             dataloaders[dom] = thdata.DataLoader(dataset=Dataset(dom_data), 
                 batch_size=batch_size, shuffle=False, collate_fn=collate_fn)
-        return dataloaders
+            if return_suploader:
+                suploaders[dom] = thdata.DataLoader(dataset=Dataset(dev_sup_dom_data[dom]), 
+                    batch_size=batch_size, shuffle=True, collate_fn=collate_fn)
+        if return_suploader:
+            return dataloaders, suploaders
+        else:
+            return dataloaders
 
 
 if __name__=='__main__':

@@ -37,24 +37,29 @@ class Model(nn.Module):
             "label_vocab": self.label_vocab,
         }
 
+        state_dict = torch.load(os.path.join(args.bert_dir, "pytorch_model.bin"))
         self.bert_nlu = BertForTaskNLU.from_pretrained(
             os.path.join(args.bert_dir, "pytorch_model.bin"),
             os.path.join(args.bert_dir, "bert_config.json"),
+            # state_dict=state_dict,
             label_list=label_list,
             max_seq_len=args.max_seq_length)
         self.loss_fct = nn.CrossEntropyLoss(size_average=False, reduce=False)
 
         self.crf_layer = CRF(self.label_vocab)
 
-    def forward(self, batch):
-        inputs = batch["model_input"]
-        padded_seqs = inputs["padded_seqs"].cuda() 
-        seq_lengths = inputs["seq_lengths"].cuda() 
+    def forward(self, padded_seqs, seq_lengths):
+        # inputs = batch["model_input"]
+        # padded_seqs = inputs["padded_seqs"].cuda() 
+        # seq_lengths = inputs["seq_lengths"].cuda() 
 
         # seq_lengths
         max_len = seq_lengths.max().item()
         idxes = torch.arange(0, max_len, out=torch.LongTensor(max_len)).unsqueeze(0)
         attn_mask = (idxes.cuda() < seq_lengths.unsqueeze(1)).float()
+
+        if padded_seqs.size(1) > max_len:
+            padded_seqs = padded_seqs[:, :max_len]
 
         dom_logits, int_logits, sl_logits = self.bert_nlu(
             input_ids=padded_seqs, 
@@ -63,22 +68,25 @@ class Model(nn.Module):
         return { "dom_logits": dom_logits, 
             "int_logits": int_logits, "sl_logits": sl_logits}
 
-    def compute_loss(self, batch, fwd_dict):
-        inputs = batch["model_input"]
-        dom_idx, int_idx = inputs["dom_idx"].cuda(), inputs["int_idx"].cuda()
+    def compute_loss(self, dom_idx, int_idx, padded_y, fwd_dict):
+        # inputs = batch["model_input"]
+        # dom_idx, int_idx = inputs["dom_idx"].cuda(), inputs["int_idx"].cuda()
         loss = (5 * self.loss_fct(fwd_dict["dom_logits"], dom_idx) 
                 + 3 * self.loss_fct(fwd_dict["int_logits"], int_idx))
 
-        padded_y = inputs["padded_y"].cuda()
-        loss += 2 * self.crf_layer.compute_loss(fwd_dict["sl_logits"], padded_y)
+        seq_len = fwd_dict["sl_logits"].size(1)
+
+        # padded_y = inputs["padded_y"].cuda()
+        loss += 2 * self.crf_layer.compute_loss(
+            fwd_dict["sl_logits"][:,1:], padded_y[:,1:seq_len])
         return loss.mean()
 
-    def predict(self, batch, fwd_dict):
+    def predict(self, seq_lengths, fwd_dict):
         dom_pred = torch.argmax(fwd_dict["dom_logits"], dim=-1).detach().cpu().numpy()
         int_pred = torch.argmax(fwd_dict["int_logits"], dim=-1).detach().cpu().numpy()
         crf_pred = self.crf_layer(fwd_dict["sl_logits"])
         lbl_pred = [crf_pred[i, :l].data.cpu().numpy() 
-                            for i, l in enumerate(batch["model_input"]["seq_lengths"])]
+                            for i, l in enumerate(seq_lengths)]
         return dom_pred, int_pred, lbl_pred
 
 
@@ -91,9 +99,9 @@ class CRF(nn.Module):
         super().__init__()
         self.label_vocab = label_vocab
         self.num_tags = label_vocab.n_words
-        self.transitions = nn.Parameter(torch.Tensor(num_tags, num_tags))
-        self.start_transitions = nn.Parameter(torch.randn(num_tags))
-        self.stop_transitions = nn.Parameter(torch.randn(num_tags))
+        self.transitions = nn.Parameter(torch.Tensor(self.num_tags, self.num_tags))
+        self.start_transitions = nn.Parameter(torch.randn(self.num_tags))
+        self.stop_transitions = nn.Parameter(torch.randn(self.num_tags))
 
         nn.init.xavier_normal_(self.transitions)
 

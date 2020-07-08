@@ -5,7 +5,7 @@ import random
 import numpy as np
 
 from models.fsbert.config import add_parser_args
-from models.fsbert.interface import train_model
+from models.fsbert.fsinterface import do_maml_train
 
 
 def parse_args():
@@ -26,7 +26,7 @@ def main(args):
     if torch.cuda.is_available():
         torch.cuda.manual_seed_all(args.seed)
 
-    train_model(args)
+    do_maml_train(args)
 
 
 if __name__=="__main__":
