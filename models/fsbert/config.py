@@ -10,8 +10,7 @@ def add_parser_args(parser):
     parser.add_argument("--dump_path", type=str, default="fsbert_exp", help="Experiment saved root path")
     parser.add_argument("--target", type=str, default="best_model.pth")
 
-    parser.add_argument("--bert_dir", type=str, 
-        default="../resource/baidu_ernie")
+    parser.add_argument("--bert_dir", type=str, default="../resource/baidu_ernie")
     parser.add_argument("--do_lower_case", action='store_true')
     parser.add_argument("--max_seq_length", type=int, default=100)
     # parser.add_argument("--emb_dim", type=int, default=400, help="embedding dimension")
@@ -29,7 +28,7 @@ def add_parser_args(parser):
     parser.add_argument("--n_shots", type=int, default=4, help="num shots")
     parser.add_argument("--max_epoch", type=int, default=5, help="number of maximum epoch")
     parser.add_argument("--lr", type=float, default=5e-5, help="learning rate")
-    parser.add_argument("--warmup_proportion", default=0.2, type=float,
+    parser.add_argument("--warmup_proportion", default=0.1, type=float,
                         help="Proportion of training to perform linear learning rate warmup for. "
                              "E.g., 0.1 = 10%% of training.")
     parser.add_argument("--early_stop", type=int, default=5, help="No improvement after several epoch, we stop training")

@@ -1,7 +1,7 @@
 #coding: utf-8
 
 
-def collect_named_entities(self, labels):
+def collect_named_entities(labels):
     named_entities = []
     start_offset, end_offset, ent_type = None, None, None
         

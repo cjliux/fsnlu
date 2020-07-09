@@ -125,7 +125,7 @@ def save_model(model, optimizer, save_path):
         "model": model.state_dict(),
         "optimizer": optimizer.state_dict(),
     }
-    return ckpt
+    torch.save(ckpt, save_path)
 
 
 def do_maml_train(args):
@@ -216,7 +216,7 @@ def do_maml_train(args):
                 sam_fwd = model(sam_seqs, sam_slens)
                 qry_loss = model.compute_loss(sam_idom, sam_iint, sam_y, sam_fwd)
 
-                meta_loss += qry_loss + 0.1 * sup_loss
+                meta_loss += qry_loss - 0.5 * sup_loss
 
                 model.load_state_dict(model_origin)
                 optimizer.load_state_dict(optim_origin)
@@ -491,7 +491,7 @@ def do_predict(args):
 
                     slvals = {}
                     for etype, start, end in ents:
-                        val = ''.join(tokens[j]).replace('#', '')
+                        val = ''.join(tokens[j][start:end+1]).replace('#', '')
                         if etype not in slvals:
                             slvals[etype] = val
                         elif isinstance(slvals[etype], str):
@@ -500,9 +500,9 @@ def do_predict(args):
                             slvals[etype].append(val)
 
                     item = {}
-                    item["id"] = batch["id"]
-                    item["domain"] = batch["domain"]
-                    item["text"] = batch["text"]
+                    item["id"] = batch["id"][j]
+                    item["domain"] = batch["domain"][j]
+                    item["text"] = batch["text"][j]
                     item["intent"] = model.intent_map.index2word[int_pred[j]]
                     item["slots"] = slvals
                     final_items.append(item)

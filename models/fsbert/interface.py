@@ -31,7 +31,7 @@ def save_model(model, optimizer, save_path):
         "model": model.state_dict(),
         "optimizer": optimizer.state_dict(),
     }
-    return ckpt
+    torch.save(ckpt, save_path)
 
 
 def evaluate(model, eval_loader, verbose=True):
@@ -146,18 +146,16 @@ def do_comb_train(args):
     tokenizer = BertTokenizer.from_pretrained(
         os.path.join(args.bert_dir, "vocab.txt"),
         do_lower_case=args.do_lower_case)
-    model = Model(args, tokenizer)
-    model.cuda()
-
+    
     ## def data
     train_loader, train_suploader = get_dataloader_for_fs_train(
         args.data_path, args.raw_data_path,
         args.evl_dm.split(','), args.batch_size, 
-        args.n_shots, tokenizer, return_suploader=True)
+        args.sup_ratio, args.n_shots, tokenizer, return_suploader=True)
     eval_loader, eval_suploader = get_dataloader_for_fs_train(
         args.data_path, args.raw_data_path,
         args.evl_dm.split(','), args.batch_size, 
-        args.n_shots, tokenizer, return_suploader=True)
+        args.sup_ratio, args.n_shots, tokenizer, return_suploader=True)
     test_loaders, test_suploaders = get_dataloader_for_fs_test(
         args.data_path, args.raw_data_path, args.batch_size, 
         args.n_shots, tokenizer, sep_dom=True, return_suploader=True)
@@ -173,6 +171,8 @@ def do_comb_train(args):
                         test_suploader.dataset), 
             args.batch_size, True)
         
+        model = Model(args, tokenizer)
+        model.cuda()
 
         ## def optim
         num_train_optim_steps = len(comb_train_loader) * args.max_epoch #// args.grad_acc_steps
@@ -209,7 +209,7 @@ def do_predict(args):
         args.n_shots, tokenizer, sep_dom=True, return_suploader=True)
 
     for dom in test_loaders.keys():
-        test_loader, test_suploader = test_loaders[dom], test_suploader[dom]
+        test_loader, test_suploader = test_loaders[dom], test_suploaders[dom]
 
         state_dict = torch.load(model_path.format(dom))
         model.load_state_dict(state_dict["model"])
@@ -223,15 +223,14 @@ def do_predict(args):
             qry_input = batch["model_input"]
             padded_seqs = qry_input["padded_seqs"].cuda()
             seq_lengths = qry_input["seq_lengths"].cuda()
-            dom_idx, int_idx = qry_input["dom_idx"].cuda(), qry_input["int_idx"].cuda()
-            padded_y = qry_input["padded_y"].cuda()
-
+            dom_idx = qry_input["dom_idx"].cuda()
+            
             with torch.no_grad():
                 qry_fwd = model(padded_seqs, seq_lengths)
                 dom_pred, int_pred, lbl_pred = model.predict(seq_lengths, qry_fwd)
 
-                int_preds.extend(int_pred); int_golds.extend(batch["int_idx"])
-                lbl_preds.extend(lbl_pred); lbl_golds.extend(batch["label_ids"])
+                int_preds.extend(int_pred)
+                lbl_preds.extend(lbl_pred)
 
                 for j in range(padded_seqs.size(0)):
                     tokens = batch["token"]
@@ -240,7 +239,7 @@ def do_predict(args):
 
                     slvals = {}
                     for etype, start, end in ents:
-                        val = ''.join(tokens[j]).replace('#', '')
+                        val = ''.join(tokens[j][start:end+1]).replace('#', '')
                         if etype not in slvals:
                             slvals[etype] = val
                         elif isinstance(slvals[etype], str):
@@ -249,9 +248,9 @@ def do_predict(args):
                             slvals[etype].append(val)
 
                     item = {}
-                    item["id"] = batch["id"]
-                    item["domain"] = batch["domain"]
-                    item["text"] = batch["text"]
+                    item["id"] = batch["id"][j]
+                    item["domain"] = batch["domain"][j]
+                    item["text"] = batch["text"][j]
                     item["intent"] = model.intent_map.index2word[int_pred[j]]
                     item["slots"] = slvals
                     final_items.append(item)
