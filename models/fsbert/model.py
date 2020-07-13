@@ -27,6 +27,8 @@ class Model(nn.Module):
         self.slots_map = Vocab.from_file(os.path.join(args.data_path, "slots.txt"))
         self.label_vocab = Vocab.from_file(os.path.join(args.data_path, "label_vocab.txt"))
         self.bin_label_vocab = Vocab.from_file(os.path.join(args.data_path, "bin_label_vocab.txt"))
+        with open(os.path.join(args.data_path, "domain2slots.json"), 'r', encoding='utf8') as fd:
+            self.dom2slots = json.load(fd)
 
         self.tokenizer = tokenizer
 
@@ -44,9 +46,10 @@ class Model(nn.Module):
             # state_dict=state_dict,
             label_list=label_list,
             max_seq_len=args.max_seq_length)
-        self.loss_fct = nn.CrossEntropyLoss(size_average=False, reduce=False)
+        # self.loss_fct = nn.CrossEntropyLoss(size_average=False, reduce=False)
+        self.loss_fct = nn.CrossEntropyLoss(reduction='none')
 
-        self.crf_layer = CRF(self.label_vocab)
+        self.crf_layer = CRF_coach(self.label_vocab, self.dom2slots)
 
     def forward(self, padded_seqs, seq_lengths):
         # inputs = batch["model_input"]
@@ -84,20 +87,22 @@ class Model(nn.Module):
     def predict(self, seq_lengths, fwd_dict):
         dom_pred = torch.argmax(fwd_dict["dom_logits"], dim=-1).detach().cpu().numpy()
         int_pred = torch.argmax(fwd_dict["int_logits"], dim=-1).detach().cpu().numpy()
-        crf_pred = self.crf_layer(fwd_dict["sl_logits"])
-        lbl_pred = [crf_pred[i, :l].data.cpu().numpy() 
-                            for i, l in enumerate(seq_lengths)]
+        crf_pred = self.crf_layer(fwd_dict["sl_logits"][:, 1:])
+        lbl_pred = [[self.label_vocab.word2index['O']] 
+                        + crf_pred[i, :ln-1].data.tolist()
+                            for i, ln in enumerate(seq_lengths.tolist())]
         return dom_pred, int_pred, lbl_pred
 
 
-class CRF(nn.Module):
+class CRF_coach(nn.Module):
     """
     Implements Conditional Random Fields that can be trained via
     backpropagation. 
     """
-    def __init__(self, label_vocab):
+    def __init__(self, label_vocab, dom2slots):
         super().__init__()
         self.label_vocab = label_vocab
+        self.dom2slots = dom2slots
         self.num_tags = label_vocab.n_words
         self.transitions = nn.Parameter(torch.Tensor(self.num_tags, self.num_tags))
         self.start_transitions = nn.Parameter(torch.randn(self.num_tags))

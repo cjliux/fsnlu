@@ -146,11 +146,13 @@ def do_maml_train(args):
     train_loader = get_dataloader_for_fs_train(
                     args.data_path, args.raw_data_path,
                     args.evl_dm.split(','), args.batch_size, 
-                    args.sup_ratio, args.n_shots, tokenizer)
+                    args.max_sup_ratio, args.max_sup_size args.n_shots, 
+                    tokenizer)
     eval_loader = get_dataloader_for_fs_eval(
                     args.data_path, args.raw_data_path,
                     args.evl_dm.split(','), args.batch_size, 
-                    args.sup_ratio, args.n_shots, tokenizer)
+                    args.max_sup_ratio, args.max_sup_size, args.n_shots, 
+                    tokenizer)
 
     ## def optim
     num_train_optim_steps = len(train_loader) * args.max_epoch #// args.grad_acc_steps

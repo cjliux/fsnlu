@@ -13,7 +13,7 @@ import pickle
 import logging
 from collections import defaultdict
 
-from .model import Model
+from .model_2 import Model
 from .data import (get_dataloader, get_dataloader_for_fs_train, 
     get_dataloader_for_fs_eval, get_dataloader_for_fs_test)
 from .tokenization import BertTokenizer
@@ -47,10 +47,11 @@ def evaluate(model, eval_loader, verbose=True):
         seq_lengths = qry_input["seq_lengths"].cuda()
         dom_idx, int_idx = qry_input["dom_idx"].cuda(), qry_input["int_idx"].cuda()
         padded_y = qry_input["padded_y"].cuda()
+        segids = qry_input["segids"].cuda()
 
         # qry
         with torch.no_grad():
-            fwd = model(padded_seqs, seq_lengths)
+            fwd = model(padded_seqs, seq_lengths, dom_idx, segids)
             dom_pred, int_pred, lbl_pred = model.predict(seq_lengths, fwd)
         
             int_preds.extend(int_pred); int_golds.extend(batch["int_idx"])
@@ -105,9 +106,10 @@ def normal_train(args, model, optimizer,
             sup_slens = sup_input["seq_lengths"].cuda()
             sup_idom = sup_input["dom_idx"].cuda()
             sup_iint = sup_input["int_idx"].cuda()
-            sup_y = sup_input["padded_y"].cuda()    
+            sup_y = sup_input["padded_y"].cuda()
+            segids = sup_input["segids"].cuda()
 
-            sup_fwd = model(sup_seqs, sup_slens)
+            sup_fwd = model(sup_seqs, sup_slens, sup_idom, segids)
             sup_loss = model.compute_loss(sup_idom, sup_iint, sup_y, sup_fwd)
 
             optimizer.zero_grad()
@@ -151,11 +153,13 @@ def do_comb_train(args):
     train_loader, train_suploader = get_dataloader_for_fs_train(
         args.data_path, args.raw_data_path,
         args.evl_dm.split(','), args.batch_size, 
-        args.sup_ratio, args.n_shots, tokenizer, return_suploader=True)
-    eval_loader, eval_suploader = get_dataloader_for_fs_train(
+        args.max_sup_ratio, args.max_sup_size, args.n_shots, 
+        tokenizer, return_suploader=True)
+    eval_loader, eval_suploader = get_dataloader_for_fs_eval(
         args.data_path, args.raw_data_path,
         args.evl_dm.split(','), args.batch_size, 
-        args.sup_ratio, args.n_shots, tokenizer, return_suploader=True)
+        args.max_sup_ratio, args.max_sup_size, args.n_shots, 
+        tokenizer, return_suploader=True)
     test_loaders, test_suploaders = get_dataloader_for_fs_test(
         args.data_path, args.raw_data_path, args.batch_size, 
         args.n_shots, tokenizer, sep_dom=True, return_suploader=True)
@@ -224,9 +228,10 @@ def do_predict(args):
             padded_seqs = qry_input["padded_seqs"].cuda()
             seq_lengths = qry_input["seq_lengths"].cuda()
             dom_idx = qry_input["dom_idx"].cuda()
+            segids = qry_input["segids"].cuda()
             
             with torch.no_grad():
-                qry_fwd = model(padded_seqs, seq_lengths)
+                qry_fwd = model(padded_seqs, seq_lengths, dom_idx, segids)
                 dom_pred, int_pred, lbl_pred = model.predict(seq_lengths, qry_fwd)
 
                 int_preds.extend(int_pred)
@@ -256,8 +261,13 @@ def do_predict(args):
                     final_items.append(item)
         
         # save file
-        with open(os.path.join(save_dir, "predict_{}.json".format(dom)),
+        os.makedirs(os.path.join(save_dir, "predict"), exists_ok=True)
+        with open(os.path.join(save_dir, "predict", "predict_{}.json".format(dom)),
                                                     'w', encoding='utf8') as fd:
             json.dump(final_items, fd, ensure_ascii=False, indent=2)
 
+        # os.makedirs(os.path.join(save_dir, "predict_pproc"), exists_ok=True)
+        # with open(os.path.join(save_dir, "predict_pproc", "predict_{}.json".format(dom)),
+        #                                             'w', encoding='utf8') as fd:
+        #     json.dump(final_items, fd, ensure_ascii=False, indent=2)
 

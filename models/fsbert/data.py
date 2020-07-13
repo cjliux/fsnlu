@@ -12,6 +12,8 @@ import logging
 logger = logging.getLogger()
 import copy
 import torch
+# import pkuseg
+import jieba
 import torch.utils.data as thdata
 from collections import defaultdict
 import sklearn.feature_extraction.text as skltext
@@ -69,7 +71,8 @@ def segment_text_and_label_seq(item, tokenizer):
                 token.extend(sub_token)
                 label.extend(sub_label)
             mid, sl = sp_tree['mid']
-            tok_mid = tokenizer.tokenize(mid)
+            # tok_mid = tokenizer.tokenize(mid)
+            tok_mid = list(mid)
             token.extend(tok_mid)
             if sl is None:
                 label.extend(['O'] * len(tok_mid))
@@ -113,6 +116,22 @@ def preprocess_item(item, tokenizer):
         else:
             l1_list.append("O")
     item["bin_label"] = l1_list
+
+    # seg info 
+    jieba_segids = []
+    segs = jieba.lcut(item["text"])
+    for seg in segs:
+        if len(seg) == 1:
+            jieba_segids.append(0)
+        elif len(seg) == 2:
+            jieba_segids.extend([1, 2])
+        else:
+            jieba_segids.extend([1] + [3] * (len(seg) - 2) + [2])
+    jieba_segids.insert(0, 0)
+    jieba_segids.append(0)
+    item["jieba_segids"] = jieba_segids
+
+    assert len(jieba_segids) == len(tokens)
 
     return item
 
@@ -326,6 +345,9 @@ def collate_fn(batch, PAD_INDEX=0):
     padded_y, _ = pad_and_batch(batch["label_ids"])
     batch["model_input"]["padded_y"] = padded_y
 
+    segids, _ = pad_and_batch(batch["jieba_segids"])
+    batch["model_input"]["segids"] = segids
+
     batch["model_input"]["dom_idx"] = torch.LongTensor(batch["dom_idx"])
     if "int_idx" in batch:
         batch["model_input"]["int_idx"] = torch.LongTensor(batch["int_idx"])
@@ -348,7 +370,8 @@ def get_dataloader(dataset, batch_size, shuffle):
 
 def get_dataloader_for_fs_train(
         data_path, raw_data_path, eval_domains: list, 
-        batch_size, sup_ratio, n_shots, tokenizer, return_suploader=False):
+        batch_size, max_sup_ratio, max_sup_size, n_shots, 
+        tokenizer, return_suploader=False):
     domain_map = Vocab.from_file(os.path.join(data_path, "domains.txt"))
     intent_map = Vocab.from_file(os.path.join(data_path, "intents.txt"))
     slots_map = Vocab.from_file(os.path.join(data_path, "slots.txt"))
@@ -365,7 +388,7 @@ def get_dataloader_for_fs_train(
     fs_data = []
     fs_sup_data = []
     for dom, dom_data in data.items():
-        sup_size = max(int(sup_ratio * len(dom_data)), n_shots)
+        sup_size = max(min(int(max_sup_ratio * len(dom_data)), max_sup_size), n_shots)
         sup_data, qry_data = separate_data_to_support_and_query(dom_data, sup_size)
         dom_data = collect_support_instances(sup_data, qry_data, int(n_shots))
         fs_data.extend(dom_data)
@@ -384,7 +407,8 @@ def get_dataloader_for_fs_train(
 
 def get_dataloader_for_fs_eval(
         data_path, raw_data_path, eval_domains: list,
-        batch_size, sup_ratio, n_shots, tokenizer, return_suploader=False):
+        batch_size, max_sup_ratio, max_sup_size, n_shots, 
+        tokenizer, return_suploader=False):
     domain_map = Vocab.from_file(os.path.join(data_path, "domains.txt"))
     intent_map = Vocab.from_file(os.path.join(data_path, "intents.txt"))
     slots_map = Vocab.from_file(os.path.join(data_path, "slots.txt"))
@@ -401,7 +425,7 @@ def get_dataloader_for_fs_eval(
     fs_data = []
     fs_sup_data = []
     for dom, dom_data in data.items():
-        sup_size = max(int(sup_ratio * len(dom_data)), n_shots)
+        sup_size = max(min(int(max_sup_ratio * len(dom_data)), max_sup_size), n_shots)
         sup_data, qry_data = separate_data_to_support_and_query(dom_data, sup_size)
         dom_data = collect_support_instances(sup_data, qry_data, int(n_shots))
         fs_data.extend(dom_data)

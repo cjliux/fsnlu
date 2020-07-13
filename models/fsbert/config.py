@@ -24,7 +24,8 @@ def add_parser_args(parser):
     # parser.add_argument("--tst_dm", type=str, help="target_domain")
 
     parser.add_argument("--batch_size", type=int, default=8, help="batch size")
-    parser.add_argument("--sup_ratio", type=float, default=0.3)
+    parser.add_argument("--max_sup_size", type=int, default=14)
+    parser.add_argument("--max_sup_ratio", type=float, default=0.3)
     parser.add_argument("--n_shots", type=int, default=4, help="num shots")
     parser.add_argument("--max_epoch", type=int, default=5, help="number of maximum epoch")
     parser.add_argument("--lr", type=float, default=5e-5, help="learning rate")
