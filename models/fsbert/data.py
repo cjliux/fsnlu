@@ -121,12 +121,13 @@ def preprocess_item(item, tokenizer):
     jieba_segids = []
     segs = jieba.lcut(item["text"])
     for seg in segs:
-        if len(seg) == 1:
-            jieba_segids.append(0)
-        elif len(seg) == 2:
-            jieba_segids.extend([1, 2])
-        else:
-            jieba_segids.extend([1] + [3] * (len(seg) - 2) + [2])
+        # if len(seg) == 1:
+        #     jieba_segids.append(0)
+        # elif len(seg) == 2:
+        #     jieba_segids.extend([1, 2])
+        # else:
+        #     jieba_segids.extend([1] + [3] * (len(seg) - 2) + [2])
+        jieba_segids.extend([1] + [0] * (len(seg) - 1))
     jieba_segids.insert(0, 0)
     jieba_segids.append(0)
     item["jieba_segids"] = jieba_segids

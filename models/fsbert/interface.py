@@ -95,6 +95,8 @@ def evaluate(model, eval_loader, verbose=True):
 
 def normal_train(args, model, optimizer, 
         train_loader, eval_loader, save_path):
+    do_eval = (eval_loader != None)
+
     sup_loss_list = []
     best_score, patience = 0, 0
     stop_training_flag = False
@@ -119,22 +121,28 @@ def normal_train(args, model, optimizer,
             sup_loss_list.append(sup_loss.item())
             pbar.set_description("(Epo {}) sup_loss: {:.4f}".format(
                 epo, np.mean(sup_loss_list)))
-        # epo eval
-        logger.info("============== Evaluate Epoch {} ==============".format(epo+1))
-        score = evaluate(model, eval_loader)
-        if score > best_score:
-            best_score, patience = score, 0
-            logger.info("Found better model!!")
-            # save_path = os.path.join(args.dump_path, "best_model.pth")
-            save_model(model, optimizer, save_path)
-            logger.info("Best model has been saved to %s" % save_path)
-        else:
-            patience += 1
-            logger.info("No better model found (%d/%d)" % (patience, args.early_stop))
 
-        if patience >= args.early_stop:
-            stop_training_flag = True
-            break
+        # epo eval
+        if do_eval:
+            logger.info("============== Evaluate Epoch {} ==============".format(epo+1))
+            score = evaluate(model, eval_loader)
+            if score > best_score:
+                best_score, patience = score, 0
+                logger.info("Found better model!!")
+                # save_path = os.path.join(args.dump_path, "best_model.pth")
+                save_model(model, optimizer, save_path)
+                logger.info("Best model has been saved to %s" % save_path)
+            else:
+                patience += 1
+                logger.info("No better model found (%d/%d)" % (patience, args.early_stop))
+
+            if args.early_stop > 0 and patience >= args.early_stop:
+                stop_training_flag = True
+                break
+        else:
+            logger.info("Saving model...")
+            save_model(model, optimizer, save_path)
+            logger.info("Saved.")
 
 
 def do_comb_train(args):
@@ -194,6 +202,60 @@ def do_comb_train(args):
 
         normal_train(args, model, optimizer, 
             comb_train_loader, eval_loader,
+            os.path.join(args.dump_path, "best_model_{}.pth".format(dom)))
+
+
+def do_comb_train_no_eval(args):
+    args.dump_path = get_output_dir(args.dump_path, args.exp_name, args.exp_id)
+    os.makedirs(args.dump_path, exist_ok=True)
+    with open(os.path.join(args.dump_path, "args.pkl"), "wb") as fd:
+        pickle.dump(args, fd)
+    init_logger(os.path.join(args.dump_path, args.log_file))
+
+    ## def model
+    tokenizer = BertTokenizer.from_pretrained(
+        os.path.join(args.bert_dir, "vocab.txt"),
+        do_lower_case=args.do_lower_case)
+    
+    ## def data
+    assert len(args.evl_dm.strip()) == 0
+    train_loader, train_suploader = get_dataloader_for_fs_train(
+        args.data_path, args.raw_data_path, [], args.batch_size, 
+        args.max_sup_ratio, args.max_sup_size, args.n_shots, 
+        tokenizer, return_suploader=True)
+    test_loaders, test_suploaders = get_dataloader_for_fs_test(
+        args.data_path, args.raw_data_path, args.batch_size, 
+        args.n_shots, tokenizer, sep_dom=True, return_suploader=True)
+
+    for dom in test_loaders.keys():
+        logger.info("[Train] train model for test domain {}".format(dom))
+        test_loader, test_suploader = test_loaders[dom], test_suploaders[dom]
+        
+        comb_train_loader = get_dataloader(
+            train_loader.dataset.merge(
+                train_suploader.dataset).merge(
+                        test_suploader.dataset), 
+            args.batch_size, True)
+        
+        model = Model(args, tokenizer)
+        model.cuda()
+
+        ## def optim
+        num_train_optim_steps = len(comb_train_loader) * args.max_epoch #// args.grad_acc_steps
+        param_optimizer = list(model.named_parameters())
+        no_decay = ['bias', 'LayerNorm.bias', 'LayerNorm.weight']
+        optimizer_grouped_parameters = [
+                {'params': [p for n, p in param_optimizer if not any(nd in n for nd in no_decay)], 'weight_decay': 0.01},
+                {'params': [p for n, p in param_optimizer if any(nd in n for nd in no_decay)], 'weight_decay': 0.0}
+            ]
+        optimizer = BertAdam(optimizer_grouped_parameters, 
+                                lr=args.lr,
+                                warmup=args.warmup_proportion,
+                                t_total=num_train_optim_steps)
+
+
+        normal_train(args, model, optimizer, 
+            comb_train_loader, None,
             os.path.join(args.dump_path, "best_model_{}.pth".format(dom)))
 
 
@@ -261,7 +323,7 @@ def do_predict(args):
                     final_items.append(item)
         
         # save file
-        os.makedirs(os.path.join(save_dir, "predict"), exists_ok=True)
+        os.makedirs(os.path.join(save_dir, "predict"), exist_ok=True)
         with open(os.path.join(save_dir, "predict", "predict_{}.json".format(dom)),
                                                     'w', encoding='utf8') as fd:
             json.dump(final_items, fd, ensure_ascii=False, indent=2)

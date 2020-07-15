@@ -5,7 +5,7 @@ import random
 import numpy as np
 
 from models.fsbert.config import add_parser_args
-from models.fsbert.interface import do_comb_train
+from models.fsbert.interface import do_comb_train_no_eval
 
 
 def parse_args():
@@ -24,9 +24,11 @@ def main(args):
     np.random.seed(args.seed)
     torch.manual_seed(args.seed)
     if torch.cuda.is_available():
+        torch.cuda.manual_seed(args.seed)
         torch.cuda.manual_seed_all(args.seed)
+        torch.backends.cudnn.deterministic = True
 
-    do_comb_train(args)
+    do_comb_train_no_eval(args)
 
 
 if __name__=="__main__":

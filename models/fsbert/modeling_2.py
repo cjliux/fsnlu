@@ -263,6 +263,7 @@ class BertEmbeddings(nn.Module):
         self.word_embeddings = nn.Embedding(config.vocab_size, config.hidden_size, padding_idx=0)
         self.position_embeddings = nn.Embedding(config.max_position_embeddings, config.hidden_size)
         self.token_type_embeddings = nn.Embedding(config.type_vocab_size, config.hidden_size)
+        self.token_type_embeddings2 = nn.Embedding(3, config.hidden_size)
 
         # self.LayerNorm is not snake-cased to stick with TensorFlow model variable name and be able to load
         # any TensorFlow checkpoint file
@@ -273,14 +274,19 @@ class BertEmbeddings(nn.Module):
         seq_length = input_ids.size(1)
         position_ids = torch.arange(seq_length, dtype=torch.long, device=input_ids.device)
         position_ids = position_ids.unsqueeze(0).expand_as(input_ids)
-        if token_type_ids is None:
-            token_type_ids = torch.zeros_like(input_ids)
-
+        
         words_embeddings = self.word_embeddings(input_ids)
         position_embeddings = self.position_embeddings(position_ids)
-        token_type_embeddings = self.token_type_embeddings(token_type_ids)
+        embeddings = words_embeddings + position_embeddings 
 
-        embeddings = words_embeddings + position_embeddings + token_type_embeddings
+        # original_token_type_embeddings = self.token_type_embeddings(torch.zeros_like(input_ids))
+        # embeddings = embeddings + + original_token_type_embeddings
+
+        if token_type_ids is not None:
+            token_type_ids = torch.zeros_like(input_ids)
+        token_type_embeddings = self.token_type_embeddings(token_type_ids)
+        embeddings = embeddings + token_type_embeddings
+        
         embeddings = self.LayerNorm(embeddings)
         embeddings = self.dropout(embeddings)
         return embeddings
