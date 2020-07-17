@@ -3,8 +3,8 @@ import os, sys
 import random
 import torch
 import numpy as np
-from models.fsbert.config import add_parser_args
-from models.fsbert.interface import eval_model, test_model
+from models.pnbert.config import add_parser_args
+from models.pnbert.fsinterface import eval_model, test_model
 
 
 def parse_args():

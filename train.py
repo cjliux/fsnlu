@@ -4,8 +4,8 @@ import torch
 import random
 import numpy as np
 
-from models.fsbert.config import add_parser_args
-from models.fsbert.interface import do_comb_train_no_eval
+from models.pnbert.config import add_parser_args
+from models.pnbert.interface import do_comb_train_no_eval
 
 
 def parse_args():
