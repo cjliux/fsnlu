@@ -110,8 +110,8 @@ class Model(nn.Module):
         
         # sl_logits = self.slots_outputs(seq_output)
         
-        sltype_logits = self.slots_type_outputs(seq_output)
-        bio_logits = self.bio_outputs(seq_outputs)
+        sltype_logits = self.sltype_outputs(seq_output)
+        bio_logits = self.bio_outputs(seq_output)
 
         batch_size, seq_len, _ = sltype_logits.size()
         feats = torch.zeros(batch_size, seq_len, self.label_vocab.n_words).cuda()

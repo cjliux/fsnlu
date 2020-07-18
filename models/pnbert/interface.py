@@ -13,7 +13,7 @@ import pickle
 import logging
 from collections import defaultdict
 
-from .model import Model
+from .model_2 import Model
 from .data import (get_dataloader, get_dataloader_for_fs_train, 
     get_dataloader_for_fs_eval, get_dataloader_for_fs_test)
 from .tokenization import BertTokenizer
@@ -26,10 +26,9 @@ from utils.conll2002_metrics import conll2002_measure as conll_eval
 logger = logging.getLogger()
 
 
-def save_model(model, optimizer, save_path):
+def save_model(model, save_path):
     ckpt = {
         "model": model.state_dict(),
-        "optimizer": optimizer.state_dict(),
     }
     torch.save(ckpt, save_path)
 
@@ -52,7 +51,7 @@ def evaluate(model, eval_loader, verbose=True):
         # qry
         with torch.no_grad():
             fwd = model(padded_seqs, seq_lengths, dom_idx, segids)
-            dom_pred, int_pred, lbl_pred = model.predict(seq_lengths, fwd)
+            dom_pred, int_pred, lbl_pred = model.predict(seq_lengths, dom_idx, fwd)
         
             int_preds.extend(int_pred); int_golds.extend(batch["int_idx"])
             lbl_preds.extend(lbl_pred); lbl_golds.extend(batch["label_ids"])
@@ -130,7 +129,7 @@ def normal_train(args, model, optimizer,
                 best_score, patience = score, 0
                 logger.info("Found better model!!")
                 # save_path = os.path.join(args.dump_path, "best_model.pth")
-                save_model(model, optimizer, save_path)
+                save_model(model, save_path)
                 logger.info("Best model has been saved to %s" % save_path)
             else:
                 patience += 1
@@ -141,7 +140,7 @@ def normal_train(args, model, optimizer,
                 break
         else:
             logger.info("Saving model...")
-            save_model(model, optimizer, save_path)
+            save_model(model, save_path)
             logger.info("Saved.")
 
 
@@ -294,7 +293,7 @@ def do_predict(args):
             
             with torch.no_grad():
                 qry_fwd = model(padded_seqs, seq_lengths, dom_idx, segids)
-                dom_pred, int_pred, lbl_pred = model.predict(seq_lengths, qry_fwd)
+                dom_pred, int_pred, lbl_pred = model.predict(seq_lengths, dom_idx, qry_fwd)
 
                 int_preds.extend(int_pred)
                 lbl_preds.extend(lbl_pred)

@@ -346,7 +346,7 @@ def collate_fn(batch, PAD_INDEX=0):
     padded_y, _ = pad_and_batch(batch["label_ids"])
     batch["model_input"]["padded_y"] = padded_y
 
-    padded_bin_y, _ = pad_and_batch(batch["blabel_ids"]b
+    padded_bin_y, _ = pad_and_batch(batch["blabel_ids"])
     batch["model_input"]["padded_bin_y"] = padded_bin_y
 
     segids, _ = pad_and_batch(batch["jieba_segids"])

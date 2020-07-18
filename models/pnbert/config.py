@@ -23,16 +23,16 @@ def add_parser_args(parser):
         default="cookbook,website")
     # parser.add_argument("--tst_dm", type=str, help="target_domain")
 
-    parser.add_argument("--batch_size", type=int, default=8, help="batch size")
-    parser.add_argument("--max_sup_size", type=int, default=14)
-    parser.add_argument("--max_sup_ratio", type=float, default=0.3)
-    parser.add_argument("--n_shots", type=int, default=4, help="num shots")
-    parser.add_argument("--max_epoch", type=int, default=5, help="number of maximum epoch")
-    parser.add_argument("--lr", type=float, default=5e-5, help="learning rate")
+    parser.add_argument("--batch_size", type=int, default=4, help="batch size")
+    parser.add_argument("--max_sup_size", type=int, default=28)
+    parser.add_argument("--max_sup_ratio", type=float, default=0.2)
+    parser.add_argument("--n_shots", type=int, default=5, help="num shots")
+    parser.add_argument("--max_epoch", type=int, default=12, help="number of maximum epoch")
+    parser.add_argument("--lr", type=float, default=6e-5, help="learning rate")
     parser.add_argument("--warmup_proportion", default=0.1, type=float,
                         help="Proportion of training to perform linear learning rate warmup for. "
                              "E.g., 0.1 = 10%% of training.")
-    parser.add_argument("--early_stop", type=int, default=5, help="No improvement after several epoch, we stop training")
+    parser.add_argument("--early_stop", type=int, default=0, help="No improvement after several epoch, we stop training")
     # parser.add_argument('--grad_acc_steps', type=int, default=1,
     #                     help="Number of updates steps to accumulate before performing a backward/update pass.")
 

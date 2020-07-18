@@ -95,11 +95,11 @@ def main(args):
     pred_files = list(sorted(os.listdir(args.predict_dir)))
 
     for file_id in range(file_cnt):
-        with open(os.path.join(args.data_path, args.correct_dir, 
+        with open(os.path.join(args.correct_dir, 
                 corr_files[file_id]), 'r', encoding='utf-8') as f:
             file_corr = json.load(f)
 
-        with open(os.path.join(args.data_path, args.predict_dir, 
+        with open(os.path.join(args.predict_dir, 
                 pred_files[file_id]), 'r', encoding='utf-8') as f:
             file_pred = json.load(f)
 

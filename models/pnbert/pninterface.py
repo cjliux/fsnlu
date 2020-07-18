@@ -72,7 +72,7 @@ def pn_evaluate(model, eval_loader, verbose=True):
                 sam_fwd = model(sam_seqs, sam_slens, sam_seg, proto_key, proto_values)
                 # sam_loss = model.compute_loss(sam_idom, sam_iint, sup_y, sam_fwd)
 
-                dom_pred, int_pred, lbl_pred = model.predict(sam_slens, sam_fwd)
+                dom_pred, int_pred, lbl_pred = model.predict(sam_slens, sam_idom, sam_fwd)
             
                 # dom_preds.extend(dom_pred); dom_golds.extend(batch["dom_idx"])
                 int_preds.extend(int_pred); int_golds.extend(batch["int_idx"])
@@ -219,8 +219,6 @@ def do_pn_train(args):
 
             qry_loss_list.append(qry_loss.item())
             pbar.set_description("(Epo {}) qry_loss:{:.4f}".format(epo+1, np.mean(qry_loss_list)))
-            
-            # break
 
         # epo eval
         logger.info("============== Evaluate Epoch {} ==============".format(epo+1))
@@ -229,7 +227,7 @@ def do_pn_train(args):
             best_score, patience = score, 0
             logger.info("Found better model!!")
             save_path = os.path.join(args.dump_path, "best_model.pth")
-            save_model(model, optimizer, save_path)
+            save_model(model, save_path)
             logger.info("Best model has been saved to %s" % save_path)
         else:
             patience += 1
@@ -304,7 +302,7 @@ def do_pn_predict(args):
                     sam_fwd = model(sam_seqs, sam_slens, sam_seg, proto_key, proto_values)
                     # sam_loss = model.compute_loss(sam_idom, sam_iint, sup_y, sam_fwd)
 
-                    dom_pred, int_pred, lbl_pred = model.predict(sam_slens, sam_fwd)
+                    dom_pred, int_pred, lbl_pred = model.predict(sam_slens, sam_idom, sam_fwd)
                     int_preds.extend(int_pred); int_golds.extend(batch["int_idx"])
                     lbl_preds.extend(lbl_pred); lbl_golds.extend(batch["label_ids"])
                 
