@@ -61,13 +61,18 @@ class Model(nn.Module):
         self.bert_enc = BertModel.from_pretrained(
             pretrained_model_path=os.path.join(args.bert_dir, "pytorch_model.bin"),
             config_path=os.path.join(args.bert_dir, "bert_config.json"))
+        # # curated bert
+        # self.bert_enc.token_type_embeddings = nn.Embedding(
+        #     2 + self.label_vocab.n_words, self.bert_enc.config.hidden_size)
+
+        self.dropout = nn.Dropout(p = 0.1)
 
         self.domain_outputs = nn.Linear(
             self.bert_enc.config.hidden_size, self.domain_map.n_words)
         self.intent_outputs = nn.Linear(
             self.bert_enc.config.hidden_size, self.intent_map.n_words)
-        # self.slots_outputs = nn.Linear(
-        #     self.bert_enc.config.hidden_size, self.label_vocab.n_words)
+        
+        ## prior slots
         self.sltype_outputs = nn.Linear(
             self.bert_enc.config.hidden_size, self.slots_map.n_words+1)
         self.bio_outputs = nn.Linear(self.bert_enc.config.hidden_size, 3)
@@ -79,7 +84,15 @@ class Model(nn.Module):
         self.bio_map = torch.LongTensor(
             [m[lbl[0]] for lbl in self.label_vocab._vocab]).cuda()
 
-        self.dropout = nn.Dropout(p = 0.1)
+        self.sltype_emb = nn.Parameter(torch.randn(sltype_outputs.weight.size()))
+        nn.init.xavier_normal_(self.sltype_emb)
+        self.bio_emb = nn.Parameter(torch.randn(bio_outputs.weight.size()))
+        nn.init.xavier_normal_(self.bio_emb)
+
+        ## postr slots
+        self.postr_sltype_outputs = nn.Linear(
+            self.bert_enc.config.hidden_size, self.slots_map.n_words+1)
+        self.postr_bio_outputs = nn.Linear(self.bert_enc.config.hidden_size, 3)
         
         self.loss_fct = nn.CrossEntropyLoss(reduction='none')
 
@@ -87,117 +100,91 @@ class Model(nn.Module):
         # init_trans = build_init_crf_trans_bio(self.label_vocab)
         # self.crf_layer.init_weights(init_trans)
 
-    def encode_proto(self, padded_seqs, seq_lengths, segids, 
+    def get_proto_dict(self, padded_seqs, seq_lengths, segids, dom_idx,
                                 int_idx, padded_y, padded_bin_y):
         batch_size, max_len = padded_seqs.size(0), seq_lengths.max().item()
         idxes = torch.arange(0, max_len, out=torch.LongTensor(max_len)).unsqueeze(0)
         attn_mask = (idxes.cuda() < seq_lengths.unsqueeze(1)).float()
 
+        return { "input_ids": padded_seqs, "label_ids": padded_y,
+                 "segids": segids, "attention_mask": attn_mask,
+                 "dom_idx": dom_idx, "int_idx": int_idx }
+
+    def get_label_repr(self, label_ids):
+        sltype_repr = self.sltype_emb(self.sltype_map)
+        bio_repr = self.bio_emb(self.bio_map)
+        label_repr = sltype_repr + bio_repr
+        return label_repr[label_ids]
+
+    def map_seq_feature(self, lin_sltype, lin_bio, seq_output):
+        sltype_logits = lin_sltype(seq_output)
+        bio_logits = lin_bio(seq_output)
+
+        batch_size, seq_len, _ = sltype_logits.size()
+        feats = (sltype_logits.index_select(-1, self.sltype_map)
+                            + bio_logits.index_select(-1, self.bio_map))
+        return feats
+
+    def attention_on_supset(self, query, key, value, mask):
+        scores_ = torch.matmul(query.unsqueeze(1), key.unsqueeze(0).transpose(-1,-2))
+        scores_.masked_fill_((1 - mask.unsqueeze(1).unsqueeze(0)).byte(), -1e9)
+        context = torch.matmul(F.softmax(scores_, -1), value.unsqueeze(0))
+        return context # B1B2S1D
+
+    def encode_with_proto(self, padded_seqs, seq_lengths, segids, proto_dict):
+        batch_size = padded_seqs.size(0)
+        if proto_dict is not None:
+            assert batch_size == 1
+
+        # seq_lengths
+        max_len = seq_lengths.max().item()
+        idxes = torch.arange(0, max_len, out=torch.LongTensor(max_len)).unsqueeze(0)
+        attn_mask = (idxes.cuda() < seq_lengths.unsqueeze(1)).float()
+
+        if padded_seqs.size(1) > max_len:
+            padded_seqs = padded_seqs[:, :max_len]
+            segids = segids[:, :max_len]
+        
+        # encode sup
+        sup_seq, sup_cls = self.bert_enc(
+            input_ids=proto_dict["input_ids"],
+            token_type_ids=proto_dict["segids"],
+            attention_mask=proto_dict["attention_mask"],
+            output_all_encoded_layers=False) # BSD, BD
+        sup_lblrepr = self.get_label_repr(proto_dict["label_ids"]) # BSD
+        # k: sup_seq; v: sup_lblrepr
+
+        # encode qry 
         seq_output, cls_output = self.bert_enc(
             input_ids=padded_seqs,
             token_type_ids=segids,
             attention_mask=attn_mask,
             output_all_encoded_layers=False)
         
-        proto_values = []
-        for i_sam in range(batch_size):
-            sam_seq_feat, sam_cls_feat = seq_output[i_sam], cls_output[i_sam]
-            label, bin_label = padded_y[i_sam], padded_bin_y[i_sam]
-            
-            prototype = {}
+        cls_output = self.dropout(cls_output)
+        seq_output = self.dropout(seq_output)
 
-            B_list, I_list = (bin_label == 1), (bin_label == 2)
-            nonzero_B = torch.nonzero(B_list)
-            num_slotname = nonzero_B.size()[0]
+        dom_logits = self.domain_outputs(cls_output)
+        int_logits = self.intent_outputs(cls_output)
 
-            if num_slotname == 0:
-                proto_values.append(prototype)
-                continue
+        feats = self.map_seq_feature(
+            self.sltype_outputs, self.bio_outputs, seq_output)
 
-            for j in range(num_slotname):
-                if num_slotname > 1 and j == 0:
-                    prev_index = nonzero_B[j]
-                    continue
-                
-                curr_index = nonzero_B[j]
-                if not (num_slotname == 1 and j == 0):
-                    nonzero_I = torch.nonzero(I_list[prev_index: curr_index])
-                    if len(nonzero_I) != 0:
-                        nonzero_I = (nonzero_I + prev_index).squeeze(1)
-                        indices = torch.cat((prev_index, nonzero_I), dim=0)
-                        hiddens_based_slotname = sam_seq_feat[indices]
-                    else:
-                        hiddens_based_slotname = sam_seq_feat[prev_index]
+        # cross attention
+        sup_lblinfo = self.attention_on_supset(
+            seq_output, sup_seq, sup_lblrepr, proto_dict["attention_mask"]) # B1B2S1D
+        sup_alpha = F.softmax(torch.matmul(cls_output, sup_cls.t()), 1)
+        lblinfo = sup_alpha.unsqueeze(-1).unsqueeze(-1).expand_as(sup_lblinfo).mul(sup_lblinfo).sum(1)
 
-                    # get slot repr
-                    slot_feat = torch.mean(hiddens_based_slotname, dim=0)
-                    slot_feat /= slot_feat.norm(dim=-1, keepdim=True)
-                    slot_name = self.label_vocab.index2word[label[prev_index].item()][2:]
-                    assert len(slot_name) > 0
-                    prototype[slot_name] = slot_feat
+        postr_feats = self.map_seq_feature(
+            self.postr_sltype_outputs, self.postr_bio_outputs, lblinfo)
+        postr_feats = postr_feats + feats
 
-                if j == num_slotname - 1:
-                    nonzero_I = torch.nonzero(I_list[curr_index:])
-                    if len(nonzero_I) != 0:
-                        nonzero_I = (nonzero_I + curr_index).squeeze(1)
-                        indices = torch.cat((curr_index, nonzero_I), dim=0)
-                        hiddens_based_slotname = sam_seq_feat[indices]
-                    else:
-                        hiddens_based_slotname = sam_seq_feat[curr_index]
-                
-                    slot_feat = torch.mean(hiddens_based_slotname, dim=0)
-                    slot_feat /= slot_feat.norm(dim=-1, keepdim=True)
-                    slot_name = self.label_vocab.index2word[label[curr_index].item()][2:]
-                    assert len(slot_name) > 0
-                    prototype[slot_name] = slot_feat
-                else:
-                    prev_index = curr_index
-        
-            proto_values.append(prototype)
+        return {"attn_mask": attn_mask, "dom_logits": dom_logits, 
+                "int_logits": int_logits, "feats": feats, "postr_feats": postr_feats,
+                "proto_dict": proto_dict } 
 
-        proto_key = cls_output
-        return proto_key, proto_values
-
-    def get_final_proto(self, proto_key, proto_values, qry_cls):
-        """
-            qry_sam_cls: T(1,D)
-        """
-        alpha = F.softmax(F.linear(qry_cls, proto_key).mean(0))
-        
-        ## hard restriction
-        all_slotnames = set()
-        for proto in proto_values:
-            all_slotnames.update(proto.keys())
-
-        proto_repr = {}
-        for a, proto in zip(alpha, proto_values):
-            for k in all_slotnames:
-                sl_repr = (proto[k] if k in proto.keys() 
-                    else self.sltype_outputs.weight[self.slots_map.word2index[k]+1])
-                sl_repr = sl_repr * a
-
-                if k not in proto_repr:
-                    proto_repr[k] = sl_repr
-                else:
-                    proto_repr[k] = proto_repr[k] + sl_repr
-
-        proto_mask, proto_mat = [0], [self.sltype_outputs.weight[0]]
-        for k in self.slots_map._vocab:
-            if k in proto_repr:
-                proto_mask.append(0)
-                proto_mat.append(proto_repr[k])
-            else:
-                proto_mask.append(1)
-                proto_mat.append(self.sltype_outputs.weight[self.slots_map.word2index[k]+1])
-        
-        proto_mask = torch.ByteTensor(proto_mask).cuda()
-        proto_mat = torch.stack(proto_mat)
-        return proto_mask, proto_mat
-
-    def forward(self, padded_seqs, seq_lengths, segids, proto_key, proto_values):
-        batch_size = padded_seqs.size(0)
-        assert batch_size == 1
-
+    def encode_without_proto(self, padded_seqs, seq_lengths, segids):
         # seq_lengths
         max_len = seq_lengths.max().item()
         idxes = torch.arange(0, max_len, out=torch.LongTensor(max_len)).unsqueeze(0)
@@ -217,23 +204,19 @@ class Model(nn.Module):
         dom_logits = self.domain_outputs(cls_output)
         int_logits = self.intent_outputs(cls_output)
         
-        proto_mask, proto_mat = self.get_final_proto(proto_key, proto_values, cls_output)
+        feats = self.map_seq_feature(seq_output)
 
-        # sltype_logits = self.slots_type_outputs(seq_output)
-        sltype_logits = F.linear(seq_output, proto_mat, bias=self.sltype_outputs.bias)
-        bio_logits = self.bio_outputs(seq_output)
+        return { "attn_mask": attn_mask, "dom_logits": dom_logits, 
+                 "int_logits": int_logits, "sl_logits": feats}
 
-        batch_size, seq_len, _ = sltype_logits.size()
-        feats = torch.zeros(batch_size, seq_len, self.label_vocab.n_words).cuda()
-        feats = (sltype_logits.index_select(-1, self.sltype_map)
-                            + bio_logits.index_select(-1, self.bio_map))
-        # feats = sltype_logits.gather(-1, self.sltype_map) + bio_logits.gather(-1, self.bio_map)
-
-        return {"attn_mask": attn_mask, "dom_logits": dom_logits, 
-                "int_logits": int_logits, "sl_logits": feats,
-                "proto_mask": proto_mask }
+    def forward(self, padded_seqs, seq_lengths, dom_idx, segids, proto_dict=None):
+        if proto_dict is not None:
+            return self.encode_with_proto(padded_seqs, seq_lengths, segids, proto_dict)
+        else:
+            return self.encode_without_proto(padded_seqs, seq_lengths, segids)
 
     def compute_loss(self, dom_idx, int_idx, padded_y, fwd_dict):
+        # qry
         loss = (2 * self.loss_fct(fwd_dict["dom_logits"], dom_idx) 
                 + 4 * self.loss_fct(fwd_dict["int_logits"], int_idx))
 
@@ -250,19 +233,48 @@ class Model(nn.Module):
                                 seq_logits, seq_mask, seq_label).sum()
         return loss
 
+    def compute_postr_loss(self, dom_idx, int_idx, padded_y, fwd_dict):
+        # qry
+        loss = (2 * self.loss_fct(fwd_dict["dom_logits"], dom_idx) 
+                + 4 * self.loss_fct(fwd_dict["int_logits"], int_idx))
+
+        seq_len = fwd_dict["sl_logits"].size(1)
+
+        seq_label = padded_y[:,1:seq_len]
+        feats, seq_mask = fwd_dict["feats"][:,1:], fwd_dict["attn_mask"][:,1:]
+        sl_loss = - F.log_softmax(feats, -1).gather(
+                                2, seq_label.unsqueeze(-1)).squeeze(-1)
+        loss = loss.sum() + sl_loss[seq_mask.byte()].sum()
+
+        seq_pfeats = fwd_dict["postr_feats"][:,1:]
+        loss = loss + self.crf_layer.compute_loss(
+                                seq_pfeats, seq_mask, seq_label).sum()
+        return loss
+
     def predict(self, seq_lengths, dom_idx, fwd_dict):
-        assert seq_lengths.size(0) == 1
-        proto_mask = fwd_dict["proto_mask"]
-        proto_mask = proto_mask.index_select(-1, self.sltype_map)
         for i_sam, i_dom in enumerate(dom_idx.tolist()):
             fwd_dict["int_logits"][i_sam].masked_fill_(self.dom_int_mask[i_dom], -1e9)
             fwd_dict["sl_logits"][i_sam].masked_fill_(self.dom_label_mask[i_dom], -1e9)
-            fwd_dict["sl_logits"][i_sam].masked_fill_(proto_mask, -1e9)
 
         dom_pred = torch.argmax(fwd_dict["dom_logits"], dim=-1).detach().cpu().numpy()
         int_pred = torch.argmax(fwd_dict["int_logits"], dim=-1).detach().cpu().numpy()
         _, crf_pred = self.crf_layer.inference(
             fwd_dict["sl_logits"][:,1:], fwd_dict["attn_mask"][:,1:])
+        lbl_pred = [[self.label_vocab.word2index['O']] 
+                        + crf_pred[i, :ln-1].data.tolist() 
+                            for i, ln in enumerate(seq_lengths.tolist())]
+        return dom_pred, int_pred, lbl_pred
+
+    def predict_postr(self, seq_lengths, dom_idx, fwd_dict):
+        assert seq_lengths.size(0) == 1
+        for i_sam, i_dom in enumerate(dom_idx.tolist()):
+            fwd_dict["int_logits"][i_sam].masked_fill_(self.dom_int_mask[i_dom], -1e9)
+            fwd_dict["postr_feats"][i_sam].masked_fill_(self.dom_label_mask[i_dom], -1e9)
+
+        dom_pred = torch.argmax(fwd_dict["dom_logits"], dim=-1).detach().cpu().numpy()
+        int_pred = torch.argmax(fwd_dict["int_logits"], dim=-1).detach().cpu().numpy()
+        _, crf_pred = self.crf_layer.inference(
+            fwd_dict["postr_feats"][:,1:], fwd_dict["attn_mask"][:,1:])
         lbl_pred = [[self.label_vocab.word2index['O']] 
                         + crf_pred[i, :ln-1].data.tolist() 
                             for i, ln in enumerate(seq_lengths.tolist())]

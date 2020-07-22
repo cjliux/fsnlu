@@ -1,8 +1,8 @@
 #coding: utf-8
 """
     @author: cjliux@gmail.com
-    @elems: bert, mtl, feat_mask, crf, cdt, sep label
-    @status: 79.4 -> 80.59
+    @elems: bert, mtl, feat_mask, crf, cdt
+    @desc: sup for aug context
 """
 import os, sys
 import copy
@@ -62,6 +62,9 @@ class Model(nn.Module):
         self.bert_enc = BertModel.from_pretrained(
             pretrained_model_path=os.path.join(args.bert_dir, "pytorch_model.bin"),
             config_path=os.path.join(args.bert_dir, "bert_config.json"))
+        # curated bert
+        self.bert_enc.token_type_embeddings = nn.Embedding(
+            2 + self.label_vocab.n_words, self.bert_enc.config.hidden_size)
 
         self.domain_outputs = nn.Linear(
             self.bert_enc.config.hidden_size, self.domain_map.n_words)
@@ -88,7 +91,25 @@ class Model(nn.Module):
         # init_trans = build_init_crf_trans_bio(self.label_vocab)
         # self.crf_layer.init_weights(init_trans)
 
-    def forward(self, padded_seqs, seq_lengths, dom_idxs, segids):
+    def encode_proto(self, padded_seqs, seq_lengths, segids, 
+                                dom_idx, int_idx, padded_y, padded_bin_y):
+        batch_size, max_len = padded_seqs.size(0), seq_lengths.max().item()
+        idxes = torch.arange(0, max_len, out=torch.LongTensor(max_len)).unsqueeze(0)
+        attn_mask = (idxes.cuda() < seq_lengths.unsqueeze(1)).float()
+
+        # seq_output, cls_output = self.bert_enc(
+        #     input_ids=padded_seqs,
+        #     token_type_ids=padded_y + 2,
+        #     attention_mask=attn_mask,
+        #     output_all_encoded_layers=False)
+
+        return { "input_ids": padded_seqs, "token_type_ids": padded_y + 2,
+                 "attention_mask": attn_mask }
+
+    def forward(self, padded_seqs, seq_lengths, segids, proto_dict):
+        batch_size = padded_seqs.size(0)
+        assert batch_size == 1
+
         # seq_lengths
         max_len = seq_lengths.max().item()
         idxes = torch.arange(0, max_len, out=torch.LongTensor(max_len)).unsqueeze(0)
@@ -96,32 +117,49 @@ class Model(nn.Module):
 
         if padded_seqs.size(1) > max_len:
             padded_seqs = padded_seqs[:, :max_len]
+            segids = segids[:, :max_len]
+        
+        qry_size, sup_size = batch_size, proto_dict["input_ids"].size(0)
+
+        full_input_ids = torch.cat((padded_seqs.unsqueeze(1).repeat(1, sup_size, 1), 
+                                proto_dict["input_ids"].unsqueeze(0)), dim=-1)
+        full_token_type_ids = torch.cat((segids.unsqueeze(1).repeat(1, sup_size, 1), 
+                                proto_dict["token_type_ids"].unsqueeze(0)), dim=-1)
+        full_attn_mask = torch.cat((attn_mask.unsqueeze(1).repeat(1, sup_size, 1), 
+                                proto_dict["attention_mask"].unsqueeze(0)), dim=-1)
+
+        qry_size, sup_size, tot_len = full_input_ids.size()
+
+        full_input_ids = full_input_ids.view(qry_size * sup_size, tot_len)
+        full_token_type_ids = full_token_type_ids.view(qry_size * sup_size, tot_len)
+        full_attn_mask = full_attn_mask.view(qry_size * sup_size, tot_len)
 
         seq_output, cls_output = self.bert_enc(
-            input_ids=padded_seqs,
-            token_type_ids=segids,
-            attention_mask=attn_mask,
+            input_ids=full_input_ids,
+            token_type_ids=full_token_type_ids,
+            attention_mask=full_attn_mask,
             output_all_encoded_layers=False)
+        # raise Exception()
+        seq_output = seq_output[:,:max_len].contiguous().view(qry_size, sup_size, max_len,-1).mean(1)
+        cls_output = cls_output[:,:].contiguous().view(qry_size, sup_size, -1).mean(1)
+
         cls_output = self.dropout(cls_output)
         seq_output = self.dropout(seq_output)
 
         dom_logits = self.domain_outputs(cls_output)
         int_logits = self.intent_outputs(cls_output)
-        
-        # sl_logits = self.slots_outputs(seq_output)
-        
+
         sltype_logits = self.sltype_outputs(seq_output)
         bio_logits = self.bio_outputs(seq_output)
 
         batch_size, seq_len, _ = sltype_logits.size()
         feats = torch.zeros(batch_size, seq_len, self.label_vocab.n_words).cuda()
-        feats = (sltype_logits.index_select(-1, self.sltype_map) 
+        feats = (sltype_logits.index_select(-1, self.sltype_map)
                             + bio_logits.index_select(-1, self.bio_map))
         # feats = sltype_logits.gather(-1, self.sltype_map) + bio_logits.gather(-1, self.bio_map)
-        
-        return { "dom_idxs": dom_idxs,
-            "attn_mask": attn_mask, "dom_logits": dom_logits, 
-            "int_logits": int_logits, "sl_logits": feats}
+
+        return {"attn_mask": attn_mask, "dom_logits": dom_logits, 
+                "int_logits": int_logits, "sl_logits": feats }
 
     def compute_loss(self, dom_idx, int_idx, padded_y, fwd_dict):
         loss = (2 * self.loss_fct(fwd_dict["dom_logits"], dom_idx) 
@@ -141,10 +179,11 @@ class Model(nn.Module):
         return loss
 
     def predict(self, seq_lengths, dom_idx, fwd_dict):
-        for i_sam, i_dom in enumerate(fwd_dict["dom_idxs"].tolist()):
+        assert seq_lengths.size(0) == 1
+        for i_sam, i_dom in enumerate(dom_idx.tolist()):
             fwd_dict["int_logits"][i_sam].masked_fill_(self.dom_int_mask[i_dom], -1e9)
             fwd_dict["sl_logits"][i_sam].masked_fill_(self.dom_label_mask[i_dom], -1e9)
-            
+
         dom_pred = torch.argmax(fwd_dict["dom_logits"], dim=-1).detach().cpu().numpy()
         int_pred = torch.argmax(fwd_dict["int_logits"], dim=-1).detach().cpu().numpy()
         _, crf_pred = self.crf_layer.inference(

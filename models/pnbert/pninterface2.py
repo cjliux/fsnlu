@@ -26,6 +26,9 @@ from utils.conll2002_metrics import conll2002_measure as conll_eval
 logger = logging.getLogger()
 
 
+from .interface import evaluate
+
+
 def pn_evaluate(model, eval_loader, verbose=True):
     # dom_preds, dom_golds = [], []
     int_preds, int_golds = [], []
@@ -46,7 +49,6 @@ def pn_evaluate(model, eval_loader, verbose=True):
         batch_size = padded_seqs.size(0)
 
         for i_sam in range(batch_size):
-            model.train()
             sup_batch = batch["support"][i_sam]
             sup_input = sup_batch["model_input"]
 
@@ -67,12 +69,12 @@ def pn_evaluate(model, eval_loader, verbose=True):
             sam_seg = segids[i_sam:i_sam+1]
 
             with torch.no_grad():
-                proto_dict = model.encode_proto(
+                proto_dict = model.get_proto_dict(
                     sup_seqs, sup_slens, sup_seg, sup_idom, sup_iint, sup_y, sup_biny)
-                sam_fwd = model(sam_seqs, sam_slens, sam_seg, proto_dict)
+                sam_fwd = model.encode_with_proto(sam_seqs, sam_slens, sam_seg, proto_dict)
                 # sam_loss = model.compute_loss(sam_idom, sam_iint, sup_y, sam_fwd)
 
-                dom_pred, int_pred, lbl_pred = model.predict(sam_slens, sam_idom, sam_fwd)
+                dom_pred, int_pred, lbl_pred = model.predict_postr(sam_slens, sam_idom, sam_fwd)
             
                 # dom_preds.extend(dom_pred); dom_golds.extend(batch["dom_idx"])
                 int_preds.extend(int_pred); int_golds.extend(batch["int_idx"])
@@ -146,6 +148,9 @@ def do_pn_train(args):
                     args.evl_dm.split(','), args.batch_size, 
                     args.max_sup_ratio, args.max_sup_size, args.n_shots, 
                     tokenizer, return_suploader=True)
+    # test_loaders, test_suploaders = get_dataloader_for_fs_test(
+    #     args.data_path, args.raw_data_path, args.batch_size, 
+    #     args.n_shots, tokenizer, sep_dom=True, return_suploader=True)
 
     ## def optim
     num_train_optim_steps = len(train_loader) * args.max_epoch #// args.grad_acc_steps
@@ -164,12 +169,45 @@ def do_pn_train(args):
     best_score, patience = 0, 0
     stop_training_flag = False
     for epo in range(args.max_epoch):
-        tr_loss = 0
-        nb_tr_examples, nb_tr_steps = 0, 0
+        model.train()
+
+        sup_loss_list = []
+
+        comb_sup_loader = get_dataloader(
+            train_suploader.dataset.merge(eval_suploader.dataset), 
+            args.batch_size, True)
+
+        score = evaluate(model, comb_sup_loader)
+
+        pbar = tqdm.tqdm(enumerate(comb_sup_loader), total=len(comb_sup_loader))
+        for step, supbatch in pbar:
+            sup_input = supbatch["model_input"]
+
+            sup_seqs = sup_input["padded_seqs"].cuda()
+            sup_slens = sup_input["seq_lengths"].cuda()
+            sup_idom = sup_input["dom_idx"].cuda()
+            sup_iint = sup_input["int_idx"].cuda()
+            sup_y = sup_input["padded_y"].cuda()
+            sup_biny = sup_input["padded_bin_y"].cuda()
+            sup_seg = sup_input["segids"].cuda()
+            
+            proto_dict = model.get_proto_dict(
+                    sup_seqs, sup_slens, sup_seg, sup_idom, sup_iint, sup_y, sup_biny)
+            sup_fwd = model.encode_without_proto(sup_seqs, sup_slens, sup_seg)
+            sup_loss = model.compute_loss(sup_idom, sup_iint, sup_y, sup_fwd)
+
+            optimizer.zero_grad()
+            sup_loss.backward()
+            optimizer.step()
+
+            sup_loss_list.append(sup_loss.item())
+            pbar.set_description("(Epo {}) sup_loss:{:.4f}".format(epo+1, np.mean(sup_loss_list)))
+
+        score = evaluate(model, comb_sup_loader)
+
+        model.train()
 
         qry_loss_list = []
-        
-        model.train()
         pbar = tqdm.tqdm(enumerate(train_loader), total=len(train_loader))
         for step, batch in pbar:
             qry_input = batch["model_input"]
@@ -205,10 +243,10 @@ def do_pn_train(args):
                 sam_biny = padded_bin_y[i_sam:i_sam+1]
                 sam_seg = segids[i_sam:i_sam+1]
 
-                proto_dict = model.encode_proto(
+                proto_dict = model.get_proto_dict(
                     sup_seqs, sup_slens, sup_seg, sup_idom, sup_iint, sup_y, sup_biny)
-                sam_fwd = model(sam_seqs, sam_slens, sam_seg, proto_dict)
-                sam_loss = model.compute_loss(sam_idom, sam_iint, sam_y, sam_fwd)
+                sam_fwd = model.encode_with_proto(sam_seqs, sam_slens, sam_seg, proto_dict)
+                sam_loss = model.compute_postr_loss(sam_idom, sam_iint, sam_y, sam_fwd)
 
                 qry_loss += sam_loss
             # qry_loss /= batch_size
@@ -216,10 +254,6 @@ def do_pn_train(args):
             optimizer.zero_grad()
             qry_loss.backward()
             optimizer.step()
-
-            tr_loss += qry_loss.item()
-            nb_tr_examples += len(batch["token"])
-            nb_tr_steps += 1
 
             qry_loss_list.append(qry_loss.item())
             pbar.set_description("(Epo {}) qry_loss:{:.4f}".format(epo+1, np.mean(qry_loss_list)))
@@ -237,10 +271,10 @@ def do_pn_train(args):
             patience += 1
             logger.info("No better model found (%d/%d)" % (patience, args.early_stop))
 
-        if patience >= args.early_stop:
+        if args.early_stop > 0 and patience >= args.early_stop:
             stop_training_flag = True
             break
-    
+
     logger.info("Done!")
 
 
@@ -301,12 +335,13 @@ def do_pn_predict(args):
                 sam_seg = segids[i_sam:i_sam+1]
 
                 with torch.no_grad():
-                    proto_dict = model.encode_proto(
+                    proto_dict = model.get_proto_dict(
                         sup_seqs, sup_slens, sup_seg, sup_idom, sup_iint, sup_y, sup_biny)
-                    sam_fwd = model(sam_seqs, sam_slens, sam_seg, proto_dict)
+                    sam_fwd = model.encode_with_proto(sam_seqs, sam_slens, sam_seg, proto_dict)
                     # sam_loss = model.compute_loss(sam_idom, sam_iint, sup_y, sam_fwd)
 
-                    dom_pred, int_pred, lbl_pred = model.predict(sam_slens, sam_idom, sam_fwd)
+                    dom_pred, int_pred, lbl_pred = model.predict_postr(sam_slens, sam_idom, sam_fwd)
+
                     int_preds.extend(int_pred); int_golds.extend(batch["int_idx"])
                     lbl_preds.extend(lbl_pred); lbl_golds.extend(batch["label_ids"])
                 

@@ -12,8 +12,9 @@ import numpy as np
 import pickle
 import logging
 from collections import defaultdict
-
-from .model_2 import Model
+ 
+from .model_2_1 import Model
+# from .model_3 import Model
 from .data import (get_dataloader, get_dataloader_for_fs_train, 
     get_dataloader_for_fs_eval, get_dataloader_for_fs_test)
 from .tokenization import BertTokenizer
@@ -182,6 +183,65 @@ def do_comb_train(args):
                         test_suploader.dataset), 
             args.batch_size, True)
         
+        model = Model(args, tokenizer)
+        model.cuda()
+
+        ## def optim
+        num_train_optim_steps = len(comb_train_loader) * args.max_epoch #// args.grad_acc_steps
+        param_optimizer = list(model.named_parameters())
+        no_decay = ['bias', 'LayerNorm.bias', 'LayerNorm.weight']
+        optimizer_grouped_parameters = [
+                {'params': [p for n, p in param_optimizer if not any(nd in n for nd in no_decay)], 'weight_decay': 0.01},
+                {'params': [p for n, p in param_optimizer if any(nd in n for nd in no_decay)], 'weight_decay': 0.0}
+            ]
+        optimizer = BertAdam(optimizer_grouped_parameters, 
+                                lr=args.lr,
+                                warmup=args.warmup_proportion,
+                                t_total=num_train_optim_steps)
+
+
+        normal_train(args, model, optimizer, 
+            comb_train_loader, eval_loader,
+            os.path.join(args.dump_path, "best_model_{}.pth".format(dom)))
+
+
+def do_comb_train_balanced_eval(args):
+    args.dump_path = get_output_dir(args.dump_path, args.exp_name, args.exp_id)
+    os.makedirs(args.dump_path, exist_ok=True)
+    with open(os.path.join(args.dump_path, "args.pkl"), "wb") as fd:
+        pickle.dump(args, fd)
+    init_logger(os.path.join(args.dump_path, args.log_file))
+
+    ## def model
+    tokenizer = BertTokenizer.from_pretrained(
+        os.path.join(args.bert_dir, "vocab.txt"),
+        do_lower_case=args.do_lower_case)
+    
+    ## def data
+    assert len(args.evl_dm.strip()) == 0
+    train_loader, train_suploader = get_dataloader_for_fs_train(
+        args.data_path, args.raw_data_path,
+        args.evl_dm.split(','), args.batch_size, 
+        args.max_sup_ratio, args.max_sup_size, args.n_shots, 
+        tokenizer, return_suploader=True)
+    # eval_loader, eval_suploader = get_dataloader_for_fs_eval(
+    #     args.data_path, args.raw_data_path,
+    #     args.evl_dm.split(','), args.batch_size, 
+    #     args.max_sup_ratio, args.max_sup_size, args.n_shots, 
+    #     tokenizer, return_suploader=True)
+    test_loaders, test_suploaders = get_dataloader_for_fs_test(
+        args.data_path, args.raw_data_path, args.batch_size, 
+        args.n_shots, tokenizer, sep_dom=True, return_suploader=True)
+
+    for dom in test_loaders.keys():
+        logger.info("[Train] train model for test domain {}".format(dom))
+        test_loader, test_suploader = test_loaders[dom], test_suploaders[dom]
+        
+        comb_train_loader = get_dataloader(
+            train_loader.dataset.merge(test_suploader.dataset), 
+            args.batch_size, True)
+        eval_loader = train_suploader
+
         model = Model(args, tokenizer)
         model.cuda()
 

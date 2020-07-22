@@ -205,8 +205,8 @@ def read_dev_support_and_query_data(
     return sup_dom_data, qry_dom_data
 
 
-def separate_data_to_support_and_query(dom_data, sup_size):
-    return separate_data_to_support_and_query_v2(dom_data, sup_size)
+def separate_data_to_support_and_query(dom_data, sup_size, *args, **kwargs):
+    return separate_data_to_support_and_query_v2(dom_data, sup_size, *args, **kwargs)
 
 
 def separate_data_to_support_and_query_v1(dom_data, sup_size):
@@ -216,7 +216,7 @@ def separate_data_to_support_and_query_v1(dom_data, sup_size):
     return sup_data, qry_data
 
 
-def separate_data_to_support_and_query_v2(dom_data, sup_size):
+def separate_data_to_support_and_query_v2(dom_data, sup_size, coverage=True):
     int_set, sl_set = set(), set()
     for item in dom_data:
         int_set.add(item["intent"])
@@ -225,6 +225,7 @@ def separate_data_to_support_and_query_v2(dom_data, sup_size):
     assert len(dom_data) > sup_size
     sup_data, qry_data = [], []
     
+    one_pass = False
     data_pool = dom_data
     while True:
         cur_ints, cur_sls = set(), set()
@@ -244,14 +245,14 @@ def separate_data_to_support_and_query_v2(dom_data, sup_size):
                         flag = 2 # new slot
                         break
 
-            if len(sup_data) < sup_size and flag > 0:
+            if (coverage and not one_pass) or (len(sup_data) < sup_size and flag > 0):
                 sup_data.append(item)
                 cur_ints.add(item["intent"])
                 cur_sls.update(item["slots"].keys())
             else:
                 new_data_pool.append(item) 
 
-        if len(sup_data) >= sup_size:
+        if  len(sup_data) >= sup_size:
             qry_data = new_data_pool
             break
         else:
@@ -260,6 +261,8 @@ def separate_data_to_support_and_query_v2(dom_data, sup_size):
             for item in data_pool:
                 int_set.add(item["intent"])
                 sl_set.update(item["slots"].keys())
+
+        one_pass = True
 
     assert len(sup_data) + len(qry_data) == len(dom_data)
     return sup_data, qry_data

@@ -1,8 +1,8 @@
 #coding: utf-8
 """
     @author: cjliux@gmail.com
-    @elems: bert, mtl, feat_mask, crf, cdt, sep label
-    @status: 79.4 -> 80.59
+    @elems: bert, mtl, feat_mask, crf, cdt, sep label, unisc
+    @status: 
 """
 import os, sys
 import copy
@@ -88,6 +88,15 @@ class Model(nn.Module):
         # init_trans = build_init_crf_trans_bio(self.label_vocab)
         # self.crf_layer.init_weights(init_trans)
 
+    def map_seq_feature(self, seq_output):
+        sltype_logits = self.sltype_outputs(seq_output)
+        bio_logits = self.bio_outputs(seq_output)
+
+        batch_size, seq_len, _ = sltype_logits.size()
+        feats = (sltype_logits.index_select(-1, self.sltype_map)
+                            + bio_logits.index_select(-1, self.bio_map))
+        return feats
+
     def forward(self, padded_seqs, seq_lengths, dom_idxs, segids):
         # seq_lengths
         max_len = seq_lengths.max().item()
@@ -108,16 +117,7 @@ class Model(nn.Module):
         dom_logits = self.domain_outputs(cls_output)
         int_logits = self.intent_outputs(cls_output)
         
-        # sl_logits = self.slots_outputs(seq_output)
-        
-        sltype_logits = self.sltype_outputs(seq_output)
-        bio_logits = self.bio_outputs(seq_output)
-
-        batch_size, seq_len, _ = sltype_logits.size()
-        feats = torch.zeros(batch_size, seq_len, self.label_vocab.n_words).cuda()
-        feats = (sltype_logits.index_select(-1, self.sltype_map) 
-                            + bio_logits.index_select(-1, self.bio_map))
-        # feats = sltype_logits.gather(-1, self.sltype_map) + bio_logits.gather(-1, self.bio_map)
+        feats = self.map_seq_feature(seq_output)
         
         return { "dom_idxs": dom_idxs,
             "attn_mask": attn_mask, "dom_logits": dom_logits, 
@@ -132,12 +132,13 @@ class Model(nn.Module):
         seq_logits, seq_mask = fwd_dict["sl_logits"][:,1:], fwd_dict["attn_mask"][:,1:]
         seq_label = padded_y[:,1:seq_len]
 
-        sl_loss = - F.log_softmax(seq_logits, -1).gather(
+        log_slprob = F.log_softmax(seq_logits, -1)
+        sl_loss = - log_slprob.gather(
                                 2, seq_label.unsqueeze(-1)).squeeze(-1)
         loss = loss.sum() + sl_loss[seq_mask.byte()].sum()
 
         loss = loss + self.crf_layer.compute_loss(
-                                seq_logits, seq_mask, seq_label).sum()
+                                log_slprob, seq_mask, seq_label).sum()
         return loss
 
     def predict(self, seq_lengths, dom_idx, fwd_dict):
@@ -148,7 +149,8 @@ class Model(nn.Module):
         dom_pred = torch.argmax(fwd_dict["dom_logits"], dim=-1).detach().cpu().numpy()
         int_pred = torch.argmax(fwd_dict["int_logits"], dim=-1).detach().cpu().numpy()
         _, crf_pred = self.crf_layer.inference(
-            fwd_dict["sl_logits"][:,1:], fwd_dict["attn_mask"][:,1:])
+                            F.log_softmax(fwd_dict["sl_logits"][:,1:], -1), 
+                            fwd_dict["attn_mask"][:,1:])
         lbl_pred = [[self.label_vocab.word2index['O']] 
                         + crf_pred[i, :ln-1].data.tolist() 
                             for i, ln in enumerate(seq_lengths.tolist())]
