@@ -84,15 +84,15 @@ class Model(nn.Module):
         self.bio_map = torch.LongTensor(
             [m[lbl[0]] for lbl in self.label_vocab._vocab]).cuda()
 
-        self.sltype_emb = nn.Parameter(torch.randn(sltype_outputs.weight.size()))
+        self.sltype_emb = nn.Parameter(torch.randn(self.sltype_outputs.weight.size()))
         nn.init.xavier_normal_(self.sltype_emb)
-        self.bio_emb = nn.Parameter(torch.randn(bio_outputs.weight.size()))
+        self.bio_emb = nn.Parameter(torch.randn(self.bio_outputs.weight.size()))
         nn.init.xavier_normal_(self.bio_emb)
 
-        ## postr slots
-        self.postr_sltype_outputs = nn.Linear(
-            self.bert_enc.config.hidden_size, self.slots_map.n_words+1)
-        self.postr_bio_outputs = nn.Linear(self.bert_enc.config.hidden_size, 3)
+        # ## postr slots
+        # self.postr_sltype_outputs = nn.Linear(
+        #     self.bert_enc.config.hidden_size, self.slots_map.n_words+1)
+        # self.postr_bio_outputs = nn.Linear(self.bert_enc.config.hidden_size, 3)
         
         self.loss_fct = nn.CrossEntropyLoss(reduction='none')
 
@@ -111,10 +111,13 @@ class Model(nn.Module):
                  "dom_idx": dom_idx, "int_idx": int_idx }
 
     def get_label_repr(self, label_ids):
-        sltype_repr = self.sltype_emb(self.sltype_map)
-        bio_repr = self.bio_emb(self.bio_map)
+        sltype_repr = self.sltype_emb[self.sltype_map]
+        bio_repr = self.bio_emb[self.bio_map]
         label_repr = sltype_repr + bio_repr
         return label_repr[label_ids]
+
+    def get_one_hot_repr(self, label_ids, label_voc):
+        return F.one_hot(label_ids, label_voc.n_words)
 
     def map_seq_feature(self, lin_sltype, lin_bio, seq_output):
         sltype_logits = lin_sltype(seq_output)
@@ -151,7 +154,7 @@ class Model(nn.Module):
             token_type_ids=proto_dict["segids"],
             attention_mask=proto_dict["attention_mask"],
             output_all_encoded_layers=False) # BSD, BD
-        sup_lblrepr = self.get_label_repr(proto_dict["label_ids"]) # BSD
+        sup_lblrepr = self.get_one_hot_repr(proto_dict["label_ids"], self.label_vocab) # BSD
         # k: sup_seq; v: sup_lblrepr
 
         # encode qry 
@@ -172,16 +175,16 @@ class Model(nn.Module):
 
         # cross attention
         sup_lblinfo = self.attention_on_supset(
-            seq_output, sup_seq, sup_lblrepr, proto_dict["attention_mask"]) # B1B2S1D
+            seq_output, sup_seq, sup_lblrepr.float(), proto_dict["attention_mask"]) # B1B2S1D
         sup_alpha = F.softmax(torch.matmul(cls_output, sup_cls.t()), 1)
-        lblinfo = sup_alpha.unsqueeze(-1).unsqueeze(-1).expand_as(sup_lblinfo).mul(sup_lblinfo).sum(1)
+        lbl_info = sup_alpha.unsqueeze(-1).unsqueeze(-1).expand_as(
+                                    sup_lblinfo).mul(sup_lblinfo).sum(1)
 
-        postr_feats = self.map_seq_feature(
-            self.postr_sltype_outputs, self.postr_bio_outputs, lblinfo)
-        postr_feats = postr_feats + feats
-
+        # postr_feats = self.map_seq_feature(
+        #     self.sltype_outputs, self.bio_outputs, lblinfo)
+        
         return {"attn_mask": attn_mask, "dom_logits": dom_logits, 
-                "int_logits": int_logits, "feats": feats, "postr_feats": postr_feats,
+                "int_logits": int_logits, "feats": feats, "lbl_info": lbl_info,
                 "proto_dict": proto_dict } 
 
     def encode_without_proto(self, padded_seqs, seq_lengths, segids):
@@ -204,7 +207,8 @@ class Model(nn.Module):
         dom_logits = self.domain_outputs(cls_output)
         int_logits = self.intent_outputs(cls_output)
         
-        feats = self.map_seq_feature(seq_output)
+        feats = self.map_seq_feature(
+            self.sltype_outputs, self.bio_outputs, seq_output)
 
         return { "attn_mask": attn_mask, "dom_logits": dom_logits, 
                  "int_logits": int_logits, "sl_logits": feats}
@@ -225,12 +229,13 @@ class Model(nn.Module):
         seq_logits, seq_mask = fwd_dict["sl_logits"][:,1:], fwd_dict["attn_mask"][:,1:]
         seq_label = padded_y[:,1:seq_len]
 
-        sl_loss = - F.log_softmax(seq_logits, -1).gather(
+        log_slprob = F.log_softmax(seq_logits, -1)
+        sl_loss = - log_slprob.gather(
                                 2, seq_label.unsqueeze(-1)).squeeze(-1)
         loss = loss.sum() + sl_loss[seq_mask.byte()].sum()
 
         loss = loss + self.crf_layer.compute_loss(
-                                seq_logits, seq_mask, seq_label).sum()
+                                log_slprob, seq_mask, seq_label).sum()
         return loss
 
     def compute_postr_loss(self, dom_idx, int_idx, padded_y, fwd_dict):
@@ -238,17 +243,22 @@ class Model(nn.Module):
         loss = (2 * self.loss_fct(fwd_dict["dom_logits"], dom_idx) 
                 + 4 * self.loss_fct(fwd_dict["int_logits"], int_idx))
 
-        seq_len = fwd_dict["sl_logits"].size(1)
+        seq_len = fwd_dict["feats"].size(1)
 
         seq_label = padded_y[:,1:seq_len]
         feats, seq_mask = fwd_dict["feats"][:,1:], fwd_dict["attn_mask"][:,1:]
-        sl_loss = - F.log_softmax(feats, -1).gather(
+        # seq_pfeats = fwd_dict["postr_feats"][:,1:]
+        lbl_info = fwd_dict["lbl_info"][:,1:]
+
+        log_slprob = torch.log((F.softmax(feats, -1) + lbl_info) / 2)
+        sl_loss = - log_slprob.gather(
                                 2, seq_label.unsqueeze(-1)).squeeze(-1)
         loss = loss.sum() + sl_loss[seq_mask.byte()].sum()
 
-        seq_pfeats = fwd_dict["postr_feats"][:,1:]
+        # log_slprob = F.log_softmax(seq_pfeats, -1)
+        log_slprob = torch.log((F.softmax(feats, -1) + lbl_info) / 2)
         loss = loss + self.crf_layer.compute_loss(
-                                seq_pfeats, seq_mask, seq_label).sum()
+                                log_slprob, seq_mask, seq_label).sum()
         return loss
 
     def predict(self, seq_lengths, dom_idx, fwd_dict):
@@ -258,8 +268,8 @@ class Model(nn.Module):
 
         dom_pred = torch.argmax(fwd_dict["dom_logits"], dim=-1).detach().cpu().numpy()
         int_pred = torch.argmax(fwd_dict["int_logits"], dim=-1).detach().cpu().numpy()
-        _, crf_pred = self.crf_layer.inference(
-            fwd_dict["sl_logits"][:,1:], fwd_dict["attn_mask"][:,1:])
+        log_slprob = F.log_softmax(fwd_dict["sl_logits"][:,1:], -1)
+        _, crf_pred = self.crf_layer.inference(log_slprob, fwd_dict["attn_mask"][:,1:])
         lbl_pred = [[self.label_vocab.word2index['O']] 
                         + crf_pred[i, :ln-1].data.tolist() 
                             for i, ln in enumerate(seq_lengths.tolist())]
@@ -269,12 +279,16 @@ class Model(nn.Module):
         assert seq_lengths.size(0) == 1
         for i_sam, i_dom in enumerate(dom_idx.tolist()):
             fwd_dict["int_logits"][i_sam].masked_fill_(self.dom_int_mask[i_dom], -1e9)
-            fwd_dict["postr_feats"][i_sam].masked_fill_(self.dom_label_mask[i_dom], -1e9)
+            # fwd_dict["postr_feats"][i_sam].masked_fill_(self.dom_label_mask[i_dom], -1e9)
+            fwd_dict["feats"][i_sam].masked_fill_(self.dom_label_mask[i_dom], -1e9)
 
         dom_pred = torch.argmax(fwd_dict["dom_logits"], dim=-1).detach().cpu().numpy()
         int_pred = torch.argmax(fwd_dict["int_logits"], dim=-1).detach().cpu().numpy()
-        _, crf_pred = self.crf_layer.inference(
-            fwd_dict["postr_feats"][:,1:], fwd_dict["attn_mask"][:,1:])
+        
+        # log_slprob = F.log_softmax(fwd_dict["postr_feats"][:,1:], -1)
+        log_slprob = torch.log(
+            (F.softmax(fwd_dict["feats"][:,1:], -1) + fwd_dict["lbl_info"][:,1:]) / 2)
+        _, crf_pred = self.crf_layer.inference(log_slprob, fwd_dict["attn_mask"][:,1:])
         lbl_pred = [[self.label_vocab.word2index['O']] 
                         + crf_pred[i, :ln-1].data.tolist() 
                             for i, ln in enumerate(seq_lengths.tolist())]
