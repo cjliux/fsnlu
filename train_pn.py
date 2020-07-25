@@ -5,7 +5,7 @@ import random
 import numpy as np
 
 from models.pnbert.config import add_parser_args
-from models.pnbert.pninterface2 import do_pn_train
+from models.pnbert.pninterface2 import do_pn_train_no_eval
 
 
 def parse_args():
@@ -28,7 +28,7 @@ def main(args):
         torch.cuda.manual_seed_all(args.seed)
         torch.backends.cudnn.deterministic = True
 
-    do_pn_train(args)
+    do_pn_train_no_eval(args)
 
 
 if __name__=="__main__":

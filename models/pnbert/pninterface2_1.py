@@ -244,6 +244,8 @@ def do_pn_train_no_eval(args):
     tokenizer = BertTokenizer.from_pretrained(
         os.path.join(args.bert_dir, "vocab.txt"),
         do_lower_case=args.do_lower_case)
+    model = Model(args, tokenizer)
+    model.cuda()
 
     ## def data
     assert len(args.evl_dm.strip()) == 0
@@ -270,9 +272,6 @@ def do_pn_train_no_eval(args):
             args.batch_size, True)
         comb_qry_loader = get_dataloader(
             train_loader.dataset, args.batch_size, True)
-
-        model = Model(args, tokenizer)
-        model.cuda()
 
         ## def optim
         num_train_optim_steps = (len(comb_sup_loader) + len(comb_qry_loader)) * args.max_epoch #// args.grad_acc_steps
