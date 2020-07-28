@@ -4,7 +4,7 @@ import random
 import torch
 import numpy as np
 from models.pnbert.config import add_parser_args
-from models.pnbert.pninterface2 import do_pn_predict
+from models.pnbert.pninterface2_1 import do_pn_predict
 
 
 def parse_args():

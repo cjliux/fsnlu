@@ -308,7 +308,7 @@ def do_pn_predict(args):
         args.n_shots, tokenizer, sep_dom=True, return_suploader=True)
 
     for dom in test_loaders.keys():
-        test_loader, test_suploader = test_loaders[dom], test_suploader[dom]
+        test_loader, test_suploader = test_loaders[dom], test_suploaders[dom]
 
         state_dict = torch.load(model_path.format(dom))
         model.load_state_dict(state_dict["model"])
@@ -322,9 +322,7 @@ def do_pn_predict(args):
             qry_input = batch["model_input"]
             padded_seqs = qry_input["padded_seqs"].cuda()
             seq_lengths = qry_input["seq_lengths"].cuda()
-            dom_idx, int_idx = qry_input["dom_idx"].cuda(), qry_input["int_idx"].cuda()
-            padded_y = qry_input["padded_y"].cuda()
-            padded_bin_y = qry_input["padded_bin_y"].cuda()
+            dom_idx = qry_input["dom_idx"].cuda()
             segids = qry_input["segids"].cuda()
 
             batch_size = padded_seqs.size(0)
@@ -345,9 +343,6 @@ def do_pn_predict(args):
                 sam_seqs = padded_seqs[i_sam:i_sam+1]
                 sam_slens = seq_lengths[i_sam:i_sam+1]
                 sam_idom = dom_idx[i_sam:i_sam+1]
-                sam_iint = int_idx[i_sam:i_sam+1]
-                sam_y = padded_y[i_sam:i_sam+1]
-                sam_biny = padded_bin_y[i_sam:i_sam+1]
                 sam_seg = segids[i_sam:i_sam+1]
 
                 with torch.no_grad():
@@ -357,8 +352,8 @@ def do_pn_predict(args):
                     
                     dom_pred, int_pred, lbl_pred = model.predict_postr(sam_slens, sam_idom, sam_fwd)
 
-                    int_preds.extend(int_pred); int_golds.extend(sam_idom.tolist())
-                    lbl_preds.extend(lbl_pred); lbl_golds.extend(sam_y.tolist())
+                    int_preds.extend(int_pred)
+                    lbl_preds.extend(lbl_pred)
                 
                     tokens = batch["token"][i_sam]
                     labels = [model.label_vocab.index2word[l] for l in lbl_pred[0]]
@@ -383,7 +378,7 @@ def do_pn_predict(args):
                     final_items.append(item)
         
         # save file
-        with open(os.path.join(save_dir, "predict_{}.json".format(dom)),
+        os.makedirs(os.path.join(save_dir, "predict"), exist_ok=True)
+        with open(os.path.join(save_dir, "predict", "predict_{}.json".format(dom)),
                                                     'w', encoding='utf8') as fd:
             json.dump(final_items, fd, ensure_ascii=False, indent=2)
-

@@ -169,7 +169,9 @@ def read_all_train_data(
 
     train_data = read_data(train_data_file, tokenizer)
     train_dom_data = defaultdict(list)
-    for item in train_data:
+    for i_sam, item in enumerate(train_data):
+        if "id" not in item:
+            item["id"] = "tr-" + str(i_sam)
         train_dom_data[item['domain']].append(item)
 
     # binarize data
@@ -197,7 +199,7 @@ def read_dev_support_and_query_data(
             domain_map, intent_map, slots_map, label_voc, bin_label_voc)
 
         dom_data = read_data(
-            os.path.join(dev_data_path, "test", "test_{}.json".format(i_dom)),
+            os.path.join(dev_data_path, "test.gt", "test_{}.json".format(i_dom)),
             tokenizer)
         qry_dom_data[i_dom] = binarize_data(dom_data, tokenizer, 
             domain_map, intent_map, slots_map, label_voc, bin_label_voc)

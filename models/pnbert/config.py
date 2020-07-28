@@ -21,6 +21,7 @@ def add_parser_args(parser):
         default="../data/smp2020ecdt/smp2020ecdt_task1_v2")
     parser.add_argument("--evl_dm", type=str, help="eval_domains",
         default="cookbook,website")
+    parser.add_argument("--tst_dm", type=str, help="test_domains", default="all")
     # parser.add_argument("--tst_dm", type=str, help="target_domain")
 
     parser.add_argument("--batch_size", type=int, default=4, help="batch size")

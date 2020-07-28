@@ -13,7 +13,7 @@ import pickle
 import logging
 from collections import defaultdict
 
-from .model_3 import Model
+from .model_3_1 import Model
 from .data import (get_dataloader, get_dataloader_for_fs_train, 
     get_dataloader_for_fs_eval, get_dataloader_for_fs_test)
 from .tokenization import BertTokenizer
@@ -22,6 +22,7 @@ from utils.nertools import collect_named_entities
 from utils.vocab import Vocab
 from utils.scaffold import get_output_dir, init_logger
 from utils.conll2002_metrics import conll2002_measure as conll_eval
+from evaluation_v2_1 import cal_sentence_acc
 
 logger = logging.getLogger()
 
@@ -30,90 +31,88 @@ from .interface import evaluate
 
 
 def pn_evaluate(model, eval_loader, verbose=True):
-    # dom_preds, dom_golds = [], []
     int_preds, int_golds = [], []
     lbl_preds, lbl_golds = [], []
+    final_items = []
 
     model.eval()
     pbar = tqdm.tqdm(enumerate(eval_loader), total=len(eval_loader))
     for i, batch in pbar:
         qry_input = batch["model_input"]
-        padded_seqs = qry_input["padded_seqs"].cuda()
-        seq_lengths = qry_input["seq_lengths"].cuda()
-        dom_idx, int_idx = qry_input["dom_idx"].cuda(), qry_input["int_idx"].cuda()
-        padded_y = qry_input["padded_y"].cuda()
-        padded_bin_y = qry_input["padded_bin_y"].cuda()
-        segids = qry_input["segids"].cuda()
+        for k, v in qry_input.items():
+            qry_input[k] = v.cuda()
+        batch["model_input"] = qry_input
 
-        # sup
-        batch_size = padded_seqs.size(0)
+        with torch.no_grad():
+            fwd_dict = model.encode_with_proto(batch)
+            dom_pred, int_pred, lbl_pred = model.predict_postr(batch, fwd_dict)
+        
+            int_preds.extend(int_pred); int_golds.extend(batch["int_idx"])
+            lbl_preds.extend(lbl_pred); lbl_golds.extend(batch["label_ids"])
 
-        for i_sam in range(batch_size):
-            sup_batch = batch["support"][i_sam]
-            sup_input = sup_batch["model_input"]
+            for i_sam in range(len(int_pred)):
+                tokens = batch["token"][i_sam]
+                labels = [model.label_vocab.index2word[l] for l in lbl_pred[i_sam]]
+                ents = collect_named_entities(labels)
 
-            sup_seqs = sup_input["padded_seqs"].cuda()
-            sup_slens = sup_input["seq_lengths"].cuda()
-            sup_idom = sup_input["dom_idx"].cuda()
-            sup_iint = sup_input["int_idx"].cuda()
-            sup_y = sup_input["padded_y"].cuda()
-            sup_biny = sup_input["padded_bin_y"].cuda()
-            sup_seg = sup_input["segids"].cuda()
+                slvals = {}
+                for etype, start, end in ents:
+                    val = ''.join(tokens[start:end+1]).replace('#', '')
+                    if etype not in slvals:
+                        slvals[etype] = val
+                    elif isinstance(slvals[etype], str):
+                        slvals[etype] = [slvals[etype], val]
+                    else:
+                        slvals[etype].append(val)
 
-            sam_seqs = padded_seqs[i_sam:i_sam+1]
-            sam_slens = seq_lengths[i_sam:i_sam+1]
-            sam_idom = dom_idx[i_sam:i_sam+1]
-            sam_iint = int_idx[i_sam:i_sam+1]
-            sam_y = padded_y[i_sam:i_sam+1]
-            sam_biny = padded_bin_y[i_sam:i_sam+1]
-            sam_seg = segids[i_sam:i_sam+1]
+                item = {}
+                item["id"] = batch["id"][i_sam] 
+                item["domain"] = batch["domain"][i_sam]
+                item["text"] = batch["text"][i_sam]
+                item["intent"] = model.intent_map.index2word[int_pred[i_sam]]
+                item["slots"] = slvals
+                final_items.append(item)
 
-            with torch.no_grad():
-                proto_dict = model.get_proto_dict(
-                    sup_seqs, sup_slens, sup_seg, sup_idom, sup_iint, sup_y, sup_biny)
-                sam_fwd = model.encode_with_proto(sam_seqs, sam_slens, sam_seg, proto_dict)
-                # sam_loss = model.compute_loss(sam_idom, sam_iint, sup_y, sam_fwd)
+    # ## compute scores
+    # scores = {}
+    # # int f1 score
+    # ma_icnt = defaultdict(lambda: defaultdict(int))
+    # for pint, gint in zip(int_preds, int_golds):
+    #     pint = model.intent_map.index2word[pint]
+    #     gint = model.intent_map.index2word[gint]
+    #     if pint == gint:
+    #         ma_icnt[pint]['tp'] += 1
+    #     else:
+    #         ma_icnt[pint]['fp'] += 1
+    #         ma_icnt[gint]['fn'] += 1
+    # scores['ma_if1'] = sum(
+    #     2 * float(ic['tp']) / float(2 * ic['tp'] + ic['fp'] + ic['fn']) 
+    #     for ic in ma_icnt.values()) / len(ma_icnt)
 
-                dom_pred, int_pred, lbl_pred = model.predict_postr(sam_slens, sam_idom, sam_fwd)
-            
-                # dom_preds.extend(dom_pred); dom_golds.extend(batch["dom_idx"])
-                int_preds.extend(int_pred); int_golds.extend(sam_iint.tolist())
-                lbl_preds.extend(lbl_pred); lbl_golds.extend(sam_y.tolist())
+    # # lbl f1 score
+    # lbl_preds = np.concatenate(lbl_preds)
+    # lbl_golds = np.concatenate(lbl_golds)
+    # lines = [ "w " + model.label_vocab.index2word[plb] 
+    #             + " " + model.label_vocab.index2word[glb] 
+    #                 for plb, glb in zip(lbl_preds, lbl_golds)]
+    # scores['lbl_conll_f1'] = conll_eval(lines)['fb1']
 
-    ## compute scores
-    scores = {}
-    # int f1 score
-    ma_icnt = defaultdict(lambda: defaultdict(int))
-    for pint, gint in zip(int_preds, int_golds):
-        pint = model.intent_map.index2word[pint]
-        gint = model.intent_map.index2word[gint]
-        if pint == gint:
-            ma_icnt[pint]['tp'] += 1
-        else:
-            ma_icnt[pint]['fp'] += 1
-            ma_icnt[gint]['fn'] += 1
-    scores['ma_if1'] = sum(
-        2 * float(ic['tp']) / float(2 * ic['tp'] + ic['fp'] + ic['fn']) 
-        for ic in ma_icnt.values()) / len(ma_icnt)
-
-    # lbl f1 score
-    lbl_preds = np.concatenate(lbl_preds)
-    lbl_golds = np.concatenate(lbl_golds)
-    lines = [ "w " + model.label_vocab.index2word[plb] 
-                + " " + model.label_vocab.index2word[glb] 
-                    for plb, glb in zip(lbl_preds, lbl_golds)]
-    scores['lbl_conll_f1'] = conll_eval(lines)['fb1']
-
-    score = (2 * scores['ma_if1'] * scores['lbl_conll_f1']) / (
-                    scores['ma_if1'] + scores['lbl_conll_f1'] + 1e-10)
+    # score = (2 * scores['ma_if1'] * scores['lbl_conll_f1']) / (
+    #                 scores['ma_if1'] + scores['lbl_conll_f1'] + 1e-10)
+    
+    (sent_acc, macro_intent_acc, micro_intent_acc, 
+        macro_f1, micro_f1) = cal_sentence_acc(
+            eval_loader.dataset.qry_data, final_items)
 
     if verbose:
         buf = "[Eval] "
-        for k, v in scores.items():
-            buf += "{}: {:.6f}; ".format(k, v)
+        # for k, v in scores.items():
+        #     buf += "{}: {:.6f}; ".format(k, v)
+        buf += "se_acc {:.6f}; ma_int {:.6f} | mi_int {:.6f}; ma_sl {:.6f} | mi_sl {:.6f}".format(
+            sent_acc, macro_intent_acc, micro_intent_acc, macro_f1, micro_f1)
         logger.info(buf)
 
-    return score 
+    return sent_acc 
 
 
 def save_model(model, save_path):
@@ -130,25 +129,17 @@ def pn_train(args, model, optimizer,
     best_score, patience = 0, 0
     stop_training_flag = False
     for epo in range(args.max_epoch):
-        
         model.train()
         sup_loss_list = []
         pbar = tqdm.tqdm(enumerate(comb_sup_loader), total=len(comb_sup_loader))
-        for step, supbatch in pbar:
-            sup_input = supbatch["model_input"]
-
-            sup_seqs = sup_input["padded_seqs"].cuda()
-            sup_slens = sup_input["seq_lengths"].cuda()
-            sup_idom = sup_input["dom_idx"].cuda()
-            sup_iint = sup_input["int_idx"].cuda()
-            sup_y = sup_input["padded_y"].cuda()
-            sup_biny = sup_input["padded_bin_y"].cuda()
-            sup_seg = sup_input["segids"].cuda()
+        for step, sup_batch in pbar:
+            sup_input = sup_batch["model_input"]
+            for k, v in sup_input.items():
+                sup_input[k] = v.cuda()
+            sup_batch["model_input"] = sup_input
             
-            proto_dict = model.get_proto_dict(
-                    sup_seqs, sup_slens, sup_seg, sup_idom, sup_iint, sup_y, sup_biny)
-            sup_fwd = model.encode_without_proto(sup_seqs, sup_slens, sup_seg)
-            sup_loss = model.compute_loss(sup_idom, sup_iint, sup_y, sup_fwd)
+            sup_fwd = model.encode_without_proto(sup_batch)
+            sup_loss = model.compute_loss(sup_batch, sup_fwd)
 
             optimizer.zero_grad()
             sup_loss.backward()
@@ -160,47 +151,15 @@ def pn_train(args, model, optimizer,
         model.train()
         qry_loss_list = []
         pbar = tqdm.tqdm(enumerate(comb_qry_loader), total=len(comb_qry_loader))
-        for step, batch in pbar:
-            qry_input = batch["model_input"]
-            padded_seqs = qry_input["padded_seqs"].cuda()
-            seq_lengths = qry_input["seq_lengths"].cuda() 
-            dom_idx, int_idx = qry_input["dom_idx"].cuda(), qry_input["int_idx"].cuda()
-            padded_y = qry_input["padded_y"].cuda()
-            padded_bin_y = qry_input["padded_bin_y"].cuda()
-            segids = qry_input["segids"].cuda()
+        for step, qry_batch in pbar:
+            qry_input = qry_batch["model_input"]
+            for k, v in qry_input.items():
+                qry_input[k] = v.cuda()
+            qry_batch["model_input"] = qry_input
 
-            # sup
-            qry_loss = 0
-            batch_size = padded_seqs.size(0)
-            for i_sam in range(batch_size):
-                sup_batch = batch["support"][i_sam]
-                sup_input = sup_batch["model_input"]
-                
-                sup_seqs = sup_input["padded_seqs"].cuda()
-                sup_slens = sup_input["seq_lengths"].cuda()
-                sup_idom = sup_input["dom_idx"].cuda()
-                sup_iint = sup_input["int_idx"].cuda()
-                sup_y = sup_input["padded_y"].cuda()
-                sup_biny = sup_input["padded_bin_y"].cuda()
-                sup_seg = sup_input["segids"].cuda()
-                
-                # qry
-                sam_seqs = padded_seqs[i_sam:i_sam+1]
-                sam_slens = seq_lengths[i_sam:i_sam+1]
-                sam_idom = dom_idx[i_sam:i_sam+1]
-                sam_iint = int_idx[i_sam:i_sam+1]
-                sam_y = padded_y[i_sam:i_sam+1]
-                sam_biny = padded_bin_y[i_sam:i_sam+1]
-                sam_seg = segids[i_sam:i_sam+1]
+            qry_fwd = model.encode_with_proto(qry_batch)
+            qry_loss = model.compute_postr_loss(qry_batch, qry_fwd)
 
-                proto_dict = model.get_proto_dict(
-                    sup_seqs, sup_slens, sup_seg, sup_idom, sup_iint, sup_y, sup_biny)
-                sam_fwd = model.encode_with_proto(sam_seqs, sam_slens, sam_seg, proto_dict)
-                sam_loss = model.compute_postr_loss(sam_idom, sam_iint, sam_y, sam_fwd)
-
-                qry_loss += sam_loss
-            # qry_loss /= batch_size
-            
             optimizer.zero_grad()
             qry_loss.backward()
             optimizer.step()
@@ -211,6 +170,7 @@ def pn_train(args, model, optimizer,
         # epo eval
         if do_eval:
             logger.info("============== Evaluate Epoch {} ==============".format(epo+1))
+            # pn_evaluate(model, comb_qry_loader) 
             score = pn_evaluate(model, eval_loader)
             if score > best_score:
                 best_score, patience = score, 0
@@ -244,8 +204,6 @@ def do_pn_train_no_eval(args):
     tokenizer = BertTokenizer.from_pretrained(
         os.path.join(args.bert_dir, "vocab.txt"),
         do_lower_case=args.do_lower_case)
-    model = Model(args, tokenizer)
-    model.cuda()
 
     ## def data
     assert len(args.evl_dm.strip()) == 0
@@ -273,8 +231,12 @@ def do_pn_train_no_eval(args):
         comb_qry_loader = get_dataloader(
             train_loader.dataset, args.batch_size, True)
 
+        model = Model(args, tokenizer)
+        model.cuda()
+
         ## def optim
         num_train_optim_steps = (len(comb_sup_loader) + len(comb_qry_loader)) * args.max_epoch #// args.grad_acc_steps
+        # num_train_optim_steps = (len(comb_qry_loader)) * args.max_epoch #// args.grad_acc_steps
         param_optimizer = list(model.named_parameters())
         no_decay = ['bias', 'LayerNorm.bias', 'LayerNorm.weight']
         optimizer_grouped_parameters = [
@@ -286,14 +248,15 @@ def do_pn_train_no_eval(args):
                          warmup=args.warmup_proportion,
                          t_total=num_train_optim_steps)
 
-        pn_train(args, model, optimizer, comb_sup_loader, comb_qry_loader, None, 
+        pn_train(args, model, optimizer, 
+            # comb_sup_loader, comb_qry_loader, None, 
+            comb_sup_loader, comb_qry_loader, test_loader, 
             os.path.join(args.dump_path, "best_model_{}.pth".format(dom)))
 
 
 def do_pn_predict(args):
     args.dump_path = get_output_dir(args.dump_path, args.exp_name, args.exp_id)
     model_path = os.path.join(args.dump_path, args.target)
-    assert os.path.isfile(model_path)
     save_dir = args.dump_path
 
     tokenizer = BertTokenizer.from_pretrained(
@@ -307,7 +270,7 @@ def do_pn_predict(args):
         args.n_shots, tokenizer, sep_dom=True, return_suploader=True)
 
     for dom in test_loaders.keys():
-        test_loader, test_suploader = test_loaders[dom], test_suploader[dom]
+        test_loader, test_suploader = test_loaders[dom], test_suploaders[dom]
 
         state_dict = torch.load(model_path.format(dom))
         model.load_state_dict(state_dict["model"])
@@ -317,50 +280,22 @@ def do_pn_predict(args):
         lbl_preds, lbl_golds = [], []
 
         pbar = tqdm.tqdm(enumerate(test_loader), total=len(test_loader))
-        for i, batch in pbar:
-            qry_input = batch["model_input"]
-            padded_seqs = qry_input["padded_seqs"].cuda()
-            seq_lengths = qry_input["seq_lengths"].cuda()
-            dom_idx, int_idx = qry_input["dom_idx"].cuda(), qry_input["int_idx"].cuda()
-            padded_y = qry_input["padded_y"].cuda()
-            padded_bin_y = qry_input["padded_bin_y"].cuda()
-            segids = qry_input["segids"].cuda()
+        for i, qry_batch in pbar:
+            qry_input = qry_batch["model_input"]
+            for k, v in qry_input.items():
+                qry_input[k] = v.cuda()
+            qry_batch["model_input"] = qry_input
 
-            batch_size = padded_seqs.size(0)
+            with torch.no_grad():
+                qry_fwd = model.encode_with_proto(qry_batch)
+                dom_pred, int_pred, lbl_pred = model.predict_postr(qry_batch, qry_fwd)
 
-            for i_sam in range(batch_size):
-                model.train()
-                sup_batch = batch["support"][i_sam]
-                sup_input = sup_batch["model_input"]
-
-                sup_seqs = sup_input["padded_seqs"].cuda()
-                sup_slens = sup_input["seq_lengths"].cuda()
-                sup_idom = sup_input["dom_idx"].cuda()
-                sup_iint = sup_input["int_idx"].cuda()
-                sup_y = sup_input["padded_y"].cuda()
-                sup_biny = sup_input["padded_bin_y"].cuda()
-                sup_seg = sup_input["segids"].cuda()
-
-                sam_seqs = padded_seqs[i_sam:i_sam+1]
-                sam_slens = seq_lengths[i_sam:i_sam+1]
-                sam_idom = dom_idx[i_sam:i_sam+1]
-                sam_iint = int_idx[i_sam:i_sam+1]
-                sam_y = padded_y[i_sam:i_sam+1]
-                sam_biny = padded_bin_y[i_sam:i_sam+1]
-                sam_seg = segids[i_sam:i_sam+1]
-
-                with torch.no_grad():
-                    proto_dict = model.get_proto_dict(
-                        sup_seqs, sup_slens, sup_seg, sup_idom, sup_iint, sup_y, sup_biny)
-                    sam_fwd = model.encode_with_proto(sam_seqs, sam_slens, sam_seg, proto_dict)
-                    
-                    dom_pred, int_pred, lbl_pred = model.predict_postr(sam_slens, sam_idom, sam_fwd)
-
-                    int_preds.extend(int_pred); int_golds.extend(sam_idom.tolist())
-                    lbl_preds.extend(lbl_pred); lbl_golds.extend(sam_y.tolist())
-                
-                    tokens = batch["token"][i_sam]
-                    labels = [model.label_vocab.index2word[l] for l in lbl_pred[0]]
+                int_preds.extend(int_pred)
+                lbl_preds.extend(lbl_pred)
+        
+                for i_sam in range(len(int_pred)):
+                    tokens = qry_batch["token"][i_sam]
+                    labels = [model.label_vocab.index2word[l] for l in lbl_pred[i_sam]]
                     ents = collect_named_entities(labels)
 
                     slvals = {}
@@ -374,15 +309,15 @@ def do_pn_predict(args):
                             slvals[etype].append(val)
 
                     item = {}
-                    item["id"] = batch["id"][i_sam]
-                    item["domain"] = batch["domain"][i_sam]
-                    item["text"] = batch["text"][i_sam]
-                    item["intent"] = model.intent_map.index2word[int_pred[0]]
+                    item["id"] = qry_batch["id"][i_sam]
+                    item["domain"] = qry_batch["domain"][i_sam]
+                    item["text"] = qry_batch["text"][i_sam]
+                    item["intent"] = model.intent_map.index2word[int_pred[i_sam]]
                     item["slots"] = slvals
                     final_items.append(item)
-        
+    
         # save file
-        with open(os.path.join(save_dir, "predict_{}.json".format(dom)),
+        os.makedirs(os.path.join(save_dir, "predict"), exist_ok=True)
+        with open(os.path.join(save_dir, "predict", "predict_{}.json".format(dom)),
                                                     'w', encoding='utf8') as fd:
             json.dump(final_items, fd, ensure_ascii=False, indent=2)
-
