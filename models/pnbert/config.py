@@ -9,6 +9,7 @@ def add_parser_args(parser):
     parser.add_argument("--log_file", type=str, default="fs_slu.log")
     parser.add_argument("--dump_path", type=str, default="pnbert_exp", help="Experiment saved root path")
     parser.add_argument("--target", type=str, default="best_model.pth")
+    parser.add_argument("--save_dir", type=str, help="save path of prediction")
 
     parser.add_argument("--bert_dir", type=str, default="../resource/baidu_ernie")
     parser.add_argument("--do_lower_case", action='store_true')

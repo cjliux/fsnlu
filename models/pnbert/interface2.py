@@ -307,7 +307,6 @@ def do_comb_train_no_eval(args):
                                 warmup=args.warmup_proportion,
                                 t_total=num_train_optim_steps)
 
-
         normal_train(args, model, optimizer, 
             comb_train_loader, None,
             os.path.join(args.dump_path, "best_model_{}.pth".format(dom)))
@@ -316,7 +315,7 @@ def do_comb_train_no_eval(args):
 def do_predict(args):
     args.dump_path = get_output_dir(args.dump_path, args.exp_name, args.exp_id)
     model_path = os.path.join(args.dump_path, args.target)
-    save_dir = args.dump_path
+    save_dir = args.save_dir if args.save_dir is not None else args.dump_path
 
     tokenizer = BertTokenizer.from_pretrained(
         os.path.join(args.bert_dir, "vocab.txt"),

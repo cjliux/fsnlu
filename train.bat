@@ -1,0 +1,1 @@
+python train_pn.py --exp_name pnbert --exp_id ecdt_pn --bert_dir ../resource/baidu_ernie --evl_dm ' ' --do_lower_case --batch_size 4 --lr 6e-5 --max_epoch 12 --n_shots 5 --warmup_proportion 0.1 --max_sup_size 50 --max_sup_ratio 0.5 --n_shots 5 --early_stop 0
