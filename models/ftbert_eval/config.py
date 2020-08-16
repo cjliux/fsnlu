@@ -4,13 +4,13 @@
 """
 
 def add_parser_args(parser):
-    parser.add_argument("--exp_name", type=str, default="pnbert", help="Experiment name")
+    parser.add_argument("--exp_name", type=str, default="ftbert", help="Experiment name")
     parser.add_argument("--exp_id", type=str, default="default", help="Experiment id")
     parser.add_argument("--log_file", type=str, default="fs_slu.log")
-    parser.add_argument("--dump_path", type=str, default="pnbert_exp", help="Experiment saved root path")
+    parser.add_argument("--dump_path", type=str, default="ftbert_exp", help="Experiment saved root path")
     parser.add_argument("--target", type=str, default="best_model_{}.pth")
-    parser.add_argument("--save_dir", type=str, help="save path of prediction")
     parser.add_argument("--no_pbar", action='store_true')
+    parser.add_argument("--save_dir", type=str, help="save path of prediction")
     parser.add_argument("--model_path", type=str, help="path to model to be loaded")
 
     parser.add_argument("--bert_dir", type=str, default="../resource/baidu_ernie")

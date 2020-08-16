@@ -114,9 +114,6 @@ def get_vocab_and_labels(train_json, dev_support_dom_json, dev_test_dom_json):
         for item in dev_test_dom_json[dom]:
             wfr += Counter(item['token'])
 
-    # print(wfr)
-    # print(lfr)
-
     dom2slots = {k:list(sorted(v)) for k, v in dom2slots.items()}
     slot2desc = {}
     for sls in dom2slots.values():

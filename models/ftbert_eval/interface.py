@@ -13,7 +13,7 @@ import pickle
 import logging
 from collections import defaultdict
  
-from .model_2_2 import Model
+from .model import Model
 
 from .data import (get_dataloader, get_dataloader_for_fs_train, 
     get_dataloader_for_fs_eval, get_dataloader_for_fs_test)
@@ -22,7 +22,8 @@ from .optimization import BertAdam, WarmupLinearSchedule
 from utils.nertools import collect_named_entities
 from utils.vocab import Vocab
 from utils.scaffold import get_output_dir, init_logger
-from utils.conll2002_metrics import conll2002_measure as conll_eval
+# from utils.conll2002_metrics import conll2002_measure as conll_eval
+from evaluation import cal_sentence_acc
 
 logger = logging.getLogger()
 
@@ -34,13 +35,16 @@ def save_model(model, save_path):
     torch.save(ckpt, save_path)
 
 
-def evaluate(model, eval_loader, verbose=True):
-    # dom_preds, dom_golds = [], []
+def evaluate(args, model, eval_loader, verbose=True):
+    final_items = []
     int_preds, int_golds = [], []
     lbl_preds, lbl_golds = [], []
 
     model.eval()
-    pbar = tqdm.tqdm(enumerate(eval_loader), total=len(eval_loader))
+    if args.no_pbar:
+        pbar = enumerate(eval_loader)
+    else:
+        pbar = tqdm.tqdm(enumerate(eval_loader), total=len(eval_loader))
     for i, batch in pbar:
         qry_input = batch["model_input"]
         for k, v in qry_input.items():
@@ -55,40 +59,40 @@ def evaluate(model, eval_loader, verbose=True):
             int_preds.extend(int_pred); int_golds.extend(batch["int_idx"])
             lbl_preds.extend(lbl_pred); lbl_golds.extend(batch["label_ids"])
 
-    ## compute scores
-    scores = {}
-    # int f1 score
-    ma_icnt = defaultdict(lambda: defaultdict(int))
-    for pint, gint in zip(int_preds, int_golds):
-        pint = model.intent_map.index2word[pint]
-        gint = model.intent_map.index2word[gint]
-        if pint == gint:
-            ma_icnt[pint]['tp'] += 1
-        else:
-            ma_icnt[pint]['fp'] += 1
-            ma_icnt[gint]['fn'] += 1
-    scores['ma_if1'] = sum(
-        2 * float(ic['tp']) / float(2 * ic['tp'] + ic['fp'] + ic['fn']) 
-        for ic in ma_icnt.values()) / len(ma_icnt)
+            for i_sam in range(len(int_pred)):
+                tokens = batch["token"][i_sam]
+                labels = [model.label_vocab.index2word[l] for l in lbl_pred[i_sam]]
+                ents = collect_named_entities(labels)
 
-    # lbl f1 score
-    lbl_preds = np.concatenate(lbl_preds)
-    lbl_golds = np.concatenate(lbl_golds)
-    lines = [ "w " + model.label_vocab.index2word[plb] 
-                + " " + model.label_vocab.index2word[glb] 
-                    for plb, glb in zip(lbl_preds, lbl_golds)]
-    scores['lbl_conll_f1'] = conll_eval(lines)['fb1']
+                slvals = {}
+                for etype, start, end in ents:
+                    val = ''.join(tokens[start:end+1]).replace('#', '')
+                    if etype not in slvals:
+                        slvals[etype] = val
+                    elif isinstance(slvals[etype], str):
+                        slvals[etype] = [slvals[etype], val]
+                    else:
+                        slvals[etype].append(val)
 
-    score = (2 * scores['ma_if1'] * scores['lbl_conll_f1']) / (
-                    scores['ma_if1'] + scores['lbl_conll_f1'] + 1e-10)
+                item = {}
+                item["id"] = batch["id"][i_sam] 
+                item["domain"] = batch["domain"][i_sam]
+                item["text"] = batch["text"][i_sam]
+                item["intent"] = model.intent_map.index2word[int_pred[i_sam]]
+                item["slots"] = slvals
+                final_items.append(item)
+
+    (sent_acc, macro_intent_acc, micro_intent_acc, 
+        macro_f1, micro_f1) = cal_sentence_acc(
+            eval_loader.dataset.qry_data, final_items)
 
     if verbose:
         buf = "[Eval] "
-        for k, v in scores.items():
-            buf += "{}: {:.6f}; ".format(k, v)
+        buf += "se_acc {:.6f}; ma_int {:.6f} | mi_int {:.6f}; ma_sl {:.6f} | mi_sl {:.6f}".format(
+            sent_acc, macro_intent_acc, micro_intent_acc, macro_f1, micro_f1)
         logger.info(buf)
 
-    return score 
+    return sent_acc 
 
 
 def normal_train(args, model, optimizer, 
@@ -99,7 +103,11 @@ def normal_train(args, model, optimizer,
     best_score, patience = 0, 0
     stop_training_flag = False
     for epo in range(args.max_epoch):
-        pbar = tqdm.tqdm(enumerate(train_loader), total=len(train_loader))
+        if args.no_pbar:
+            pbar = enumerate(train_loader)
+            period = int(len(train_loader) * 0.1)
+        else:
+            pbar = tqdm.tqdm(enumerate(train_loader), total=len(train_loader))
         for i, batch in pbar:
             sup_input = batch["model_input"]
             for k, v in sup_input.items():
@@ -114,13 +122,18 @@ def normal_train(args, model, optimizer,
             optimizer.step()
 
             sup_loss_list.append(sup_loss.item())
-            pbar.set_description("(Epo {}) sup_loss: {:.4f}".format(
-                epo, np.mean(sup_loss_list)))
+
+            msg = "(Epo {}) sup_loss: {:.4f}".format(epo, np.mean(sup_loss_list))
+            if not args.no_pbar:
+                pbar.set_description(msg)
+            elif (i+1) % period == 0:
+                logger.info(msg + " [{}/{}({:.2f}%)]".format(
+                    i+1, len(train_loader), 100 * float(i+1) /len(train_loader)))
 
         # epo eval
         if do_eval:
             logger.info("============== Evaluate Epoch {} ==============".format(epo+1))
-            score = evaluate(model, eval_loader)
+            score = evaluate(args, model, eval_loader)
             if score > best_score:
                 best_score, patience = score, 0
                 logger.info("Found better model!!")
@@ -308,13 +321,15 @@ def do_comb_train_no_eval(args):
                                 t_total=num_train_optim_steps)
 
         normal_train(args, model, optimizer, 
-            comb_train_loader, None,
+            comb_train_loader, test_loader,
             os.path.join(args.dump_path, "best_model_{}.pth".format(dom)))
 
 
 def do_predict(args):
     args.dump_path = get_output_dir(args.dump_path, args.exp_name, args.exp_id)
-    model_path = os.path.join(args.dump_path, args.target)
+    model_path = (os.path.join(args.model_path, args.target) 
+                                if args.model_path is not None 
+                                else os.path.join(args.dump_path, args.target))
     save_dir = args.save_dir if args.save_dir is not None else args.dump_path
 
     tokenizer = BertTokenizer.from_pretrained(
@@ -328,16 +343,21 @@ def do_predict(args):
         args.n_shots, tokenizer, sep_dom=True, return_suploader=True)
 
     for dom in test_loaders.keys():
+        logger.info("[Test] test model for test domain {}".format(dom))
         test_loader, test_suploader = test_loaders[dom], test_suploaders[dom]
 
         state_dict = torch.load(model_path.format(dom))
         model.load_state_dict(state_dict["model"])
+        model.eval()
 
         final_items = []
         int_preds, int_golds = [], []
         lbl_preds, lbl_golds = [], []
 
-        pbar = tqdm.tqdm(enumerate(test_loader), total=len(test_loader))
+        if args.no_pbar:
+            pbar = enumerate(test_loader)
+        else:
+            pbar = tqdm.tqdm(enumerate(test_loader), total=len(test_loader))
         for i, batch in pbar:
             qry_input = batch["model_input"]
             for k, v in qry_input.items():
@@ -351,14 +371,14 @@ def do_predict(args):
                 int_preds.extend(int_pred)
                 lbl_preds.extend(lbl_pred)
 
-                for j in range(len(batch["tokens"])):
-                    tokens = batch["token"]
+                for j in range(len(batch["token"])):
+                    tokens = batch["token"][j]
                     labels = [model.label_vocab.index2word[l] for l in lbl_pred[j]]
                     ents = collect_named_entities(labels)
 
                     slvals = {}
                     for etype, start, end in ents:
-                        val = ''.join(tokens[j][start:end+1]).replace('#', '')
+                        val = ''.join(tokens[start:end+1]).replace('#', '')
                         if etype not in slvals:
                             slvals[etype] = val
                         elif isinstance(slvals[etype], str):
@@ -373,7 +393,7 @@ def do_predict(args):
                     item["intent"] = model.intent_map.index2word[int_pred[j]]
                     item["slots"] = slvals
                     final_items.append(item)
-        
+            
         # save file
         os.makedirs(os.path.join(save_dir, "predict"), exist_ok=True)
         with open(os.path.join(save_dir, "predict", "predict_{}.json".format(dom)),

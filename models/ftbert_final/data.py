@@ -20,19 +20,30 @@ import sklearn.feature_extraction.text as skltext
 from scipy import sparse
 
 from utils.vocab import Vocab
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 
-def segment_text_and_label_seq(item, tokenizer):
+def segment_text_and_label_seq(item, tokenizer=None):
     labeled = "slots" in item
     # text = ''.join(item["text"].split())
     text = item["text"]
     if labeled:
         sv_pairs = []
         for sl, val in item["slots"].items():
-            if not isinstance(val, list):
-                val = [val]
-            for v in val:
-                sv_pairs.append((sl, v))
+            def dfs_add(sl, val):
+                nonlocal sv_pairs
+                if isinstance(val, str):
+                    sv_pairs.append((sl, val))
+                elif isinstance(val, dict):
+                    for k, v in val.items():
+                        dfs_add(sl+ '_' + k, v)
+                elif isinstance(val, list):
+                    for v in val:
+                        sv_pairs.append((sl, v))
+                else:
+                    raise Exception('unrecognized type')
+            dfs_add(sl, val)
+
         sv_pairs = sorted(sv_pairs, key=lambda x: len(x[1]), reverse=True)
 
         def search_span(root, sv_pairs):
@@ -87,8 +98,19 @@ def segment_text_and_label_seq(item, tokenizer):
         token, label = merge_labels(sp_tree)
 
         # check
-        for sl in item["slots"].keys():
-            assert "B-" + sl in label
+        def dfs_check(sl, val, label):
+            if isinstance(val, str):
+                assert 'B-' + sl in label
+            elif isinstance(val, dict):
+                for k, v in val.items():
+                    dfs_check(sl+ '_' + k, v, label)
+            elif isinstance(val, list):
+                for v in val:
+                    dfs_check(sl, v, label)
+            else:
+                raise Exception('unrecognized type')
+        for sl, val in item["slots"].items():
+            dfs_check(sl, val, label)
     else:
         token = list(text)
         label = ['O'] * len(token)
@@ -137,7 +159,7 @@ def preprocess_item(item, tokenizer):
     return item
 
 
-def read_data(filepath, tokenizer):
+def read_data(filepath, tokenizer=None):
     with open(filepath, "r", encoding='utf8') as fd:
         json_data = json.load(fd)
     data = [preprocess_item(item, tokenizer) for item in json_data]
@@ -182,43 +204,41 @@ def read_all_train_data(
     return data
 
 
-def read_dev_support_and_query_data(
-        dev_data_path, tokenizer,
+def read_support_data(
+        sup_dir, tokenizer,
         domain_map, intent_map, slots_map, 
         label_voc, bin_label_voc):
     logger.info("Loading and processing dev data ...")
 
-    sup_dir = os.path.join(dev_data_path, "support")
     sup_files = [f for f in os.listdir(sup_dir) if f.startswith("support")]
-    sup_dom_data, qry_dom_data = {}, {}
+    sup_dom_data = {}
     for sup_file in sup_files:
         i_dom = sup_file[sup_file.index('_')+1:sup_file.rindex('.')]
         dom_data = read_data(
             os.path.join(sup_dir, sup_file), tokenizer)
         sup_dom_data[i_dom] = binarize_data(dom_data, tokenizer,
             domain_map, intent_map, slots_map, label_voc, bin_label_voc)
+    return sup_dom_data
 
+
+def read_test_data(
+        test_dir, tokenizer,
+        domain_map, intent_map, slots_map, 
+        label_voc, bin_label_voc):
+    logger.info("Loading and processing dev data ...")
+
+    tst_files = [f for f in os.listdir(test_dir) if f.startswith("test")]
+    tst_dom_data = {}
+    for tst_file in tst_files:
+        i_dom = tst_file[tst_file.index('_')+1:tst_file.rindex('.')]
         dom_data = read_data(
-            os.path.join(dev_data_path, "test", "test_{}.json".format(i_dom)),
-            tokenizer)
-        qry_dom_data[i_dom] = binarize_data(dom_data, tokenizer, 
+            os.path.join(test_dir, tst_file), tokenizer)
+        tst_dom_data[i_dom] = binarize_data(dom_data, tokenizer,
             domain_map, intent_map, slots_map, label_voc, bin_label_voc)
-
-    return sup_dom_data, qry_dom_data
-
-
-def separate_data_to_support_and_query(dom_data, sup_size, *args, **kwargs):
-    return separate_data_to_support_and_query_v2(dom_data, sup_size, *args, **kwargs)
+    return tst_dom_data
 
 
-def separate_data_to_support_and_query_v1(dom_data, sup_size):
-    # sup_data, qry_data = [], []
-    sup_data = dom_data[:sup_size]
-    qry_data = dom_data[sup_size:]
-    return sup_data, qry_data
-
-
-def separate_data_to_support_and_query_v2(dom_data, sup_size, coverage=True):
+def separate_data_to_support_and_query(dom_data, sup_size, coverage=True):
     int_set, sl_set = set(), set()
     for item in dom_data:
         int_set.add(item["intent"])
@@ -281,12 +301,12 @@ def collect_support_instances(sup_data, qry_data, n_shots, is_same=False):
     all_texts = [it['text'] for it in sup_data] + [it['text'] for it in qry_data]
     all_feats = tfidf_vec.fit_transform(all_texts).todense()
     sup_feats, qry_feats = all_feats[:len(sup_data)], all_feats[len(sup_data):]
-    sup_feats, qry_feats = torch.Tensor(sup_feats).cuda(), torch.Tensor(qry_feats).cuda()
+    sup_feats, qry_feats = torch.Tensor(sup_feats).to(device), torch.Tensor(qry_feats).to(device)
     sim_rank = torch.matmul(qry_feats, sup_feats.t()) / (
                         qry_feats.norm(p=2, dim=1).unsqueeze(1) 
                             * sup_feats.norm(p=2, dim=1).unsqueeze(0))
     if is_same:
-        sim_rank.masked_fill_(torch.eye(sim_rank.size(0)).byte().cuda(), -1e6)
+        sim_rank.masked_fill_(torch.eye(sim_rank.size(0)).byte().to(device), -1e6)
     sup_topk = torch.topk(sim_rank, n_shots, dim=1)[1]
 
     fs_data = []
@@ -311,8 +331,6 @@ class Dataset(thdata.Dataset):
         return len(self.qry_data)
 
     def __getitem__(self, index):
-        # sup_set = (self.sup_data if self.n_shots is None 
-        #     else random.sample(self.sup_data, self.n_shots))
         qry_inst = self.qry_data[index]
         return qry_inst
 
@@ -377,10 +395,12 @@ def get_dataloader(dataset, batch_size, shuffle):
     return loader
 
 
-def get_dataloader_for_fs_train(
-        data_path, raw_data_path, eval_domains: list, 
-        batch_size, max_sup_ratio, max_sup_size, n_shots, 
-        tokenizer, return_suploader=False):
+def get_dataloader_for_train(args, tokenizer):
+    data_path, raw_data_path = args.data_path, args.raw_data_path
+    batch_size = args.batch_size
+    if args.load_userdict:
+        jieba.load_userdict(args.userdict)
+
     domain_map = Vocab.from_file(os.path.join(data_path, "domains.txt"))
     intent_map = Vocab.from_file(os.path.join(data_path, "intents.txt"))
     slots_map = Vocab.from_file(os.path.join(data_path, "slots.txt"))
@@ -388,73 +408,71 @@ def get_dataloader_for_fs_train(
     bin_label_vocab = Vocab.from_file(os.path.join(data_path, "bin_label_vocab.txt"))
 
     # train 
-    all_train_data = read_all_train_data(
-        os.path.join(raw_data_path, "source.json"), tokenizer,
-        domain_map, intent_map, slots_map, label_vocab, bin_label_vocab)
-    data = {k:v for k,v in all_train_data.items() if k not in eval_domains}
+    all_train_data = [] 
     
-    ## wrap dataset
-    fs_data = []
-    fs_sup_data = []
-    for dom, dom_data in data.items():
-        sup_size = max(min(int(max_sup_ratio * len(dom_data)), max_sup_size), n_shots)
-        sup_data, qry_data = separate_data_to_support_and_query(dom_data, sup_size)
-        dom_data = collect_support_instances(sup_data, qry_data, int(n_shots))
-        fs_data.extend(dom_data)
-        if return_suploader:
-            fs_sup_data.extend(sup_data)
+    train_dom_data = read_all_train_data(
+        os.path.join(raw_data_path, "source.json"), tokenizer,
+        domain_map, intent_map, slots_map, label_vocab, bin_label_vocab)
 
-    dataloader = thdata.DataLoader(dataset=Dataset(fs_data), 
+    for dom, dom_data in train_dom_data.items():
+        all_train_data.extend(dom_data)
+
+    dev_sup_dom_data = read_support_data(
+        os.path.join(raw_data_path, "dev", "support"), 
+        tokenizer, domain_map, intent_map, slots_map, 
+        label_vocab, bin_label_vocab)
+
+    for i_dom, dom_data in dev_sup_dom_data.items():
+        all_train_data.extend(dom_data)
+
+    dataloader = thdata.DataLoader(dataset=Dataset(all_train_data), 
         batch_size=batch_size, shuffle=True, collate_fn=collate_fn)
-    if return_suploader:
-        suploader = thdata.DataLoader(dataset=Dataset(fs_sup_data), 
-            batch_size=batch_size, shuffle=True, collate_fn=collate_fn)
-        return dataloader, suploader
-    else:
-        return dataloader
+    return dataloader
 
 
-def get_dataloader_for_fs_eval(
-        data_path, raw_data_path, eval_domains: list,
-        batch_size, max_sup_ratio, max_sup_size, n_shots, 
-        tokenizer, return_suploader=False):
+def get_dataloader_for_support(args, tokenizer, sep_dom=False):
+    data_path, fin_data_path = args.data_path, args.fin_data_path
+    batch_size = args.batch_size
+    if args.load_userdict:
+        jieba.load_userdict(args.userdict)
+
     domain_map = Vocab.from_file(os.path.join(data_path, "domains.txt"))
     intent_map = Vocab.from_file(os.path.join(data_path, "intents.txt"))
     slots_map = Vocab.from_file(os.path.join(data_path, "slots.txt"))
     label_vocab = Vocab.from_file(os.path.join(data_path, "label_vocab.txt"))
     bin_label_vocab = Vocab.from_file(os.path.join(data_path, "bin_label_vocab.txt"))
 
-    # train 
-    all_train_data = read_all_train_data(
-        os.path.join(raw_data_path, "source.json"), tokenizer,
-        domain_map, intent_map, slots_map, label_vocab, bin_label_vocab)
-    data = {k:v for k,v in all_train_data.items() if k in eval_domains}
+    sup_dom_data = read_support_data(
+        os.path.join(fin_data_path, "support"), 
+        tokenizer, domain_map, intent_map, slots_map, 
+        label_vocab, bin_label_vocab)
 
-    # eval support & query
-    fs_data = []
-    fs_sup_data = []
-    for dom, dom_data in data.items():
-        sup_size = max(min(int(max_sup_ratio * len(dom_data)), max_sup_size), n_shots)
-        sup_data, qry_data = separate_data_to_support_and_query(dom_data, sup_size)
-        dom_data = collect_support_instances(sup_data, qry_data, int(n_shots))
-        fs_data.extend(dom_data)
-        if return_suploader:
-            fs_sup_data.extend(sup_data)
-
-    dataloader = thdata.DataLoader(dataset=Dataset(fs_data), 
-        batch_size=batch_size, shuffle=False, collate_fn=collate_fn)
-    if return_suploader:
-        suploader = thdata.DataLoader(dataset=Dataset(fs_sup_data), 
-            batch_size=batch_size, shuffle=True, collate_fn=collate_fn)
-        return dataloader, suploader
+    if not sep_dom:
+        sup_data = []
+        for dom_data in sup_dom_data.values():
+            sup_data.extend(dom_data)
+        
+        suploader = thdata.DataLoader(
+                            dataset=Dataset(sup_data), 
+                            batch_size=batch_size, shuffle=True, 
+                            collate_fn=collate_fn)
+        return suploader
     else:
-        return dataloader
+        suploaders = {}
+        for dom, dom_data in sup_dom_data.items():
+            suploaders[dom] = thdata.DataLoader(
+                            dataset=Dataset(sup_dom_data[dom]), 
+                            batch_size=batch_size, shuffle=True,
+                            collate_fn=collate_fn)
+        return suploaders
 
 
-def get_dataloader_for_fs_test(
-        data_path, raw_data_path,
-        batch_size, n_shots, tokenizer, 
-        sep_dom=False, return_suploader=False):
+def get_dataloader_for_test(args, tokenizer, sep_dom=False):
+    data_path, fin_data_path = args.data_path, args.fin_data_path
+    batch_size = args.batch_size
+    if args.load_userdict:
+        jieba.load_userdict(args.userdict)
+
     domain_map = Vocab.from_file(os.path.join(data_path, "domains.txt"))
     intent_map = Vocab.from_file(os.path.join(data_path, "intents.txt"))
     slots_map = Vocab.from_file(os.path.join(data_path, "slots.txt"))
@@ -462,44 +480,29 @@ def get_dataloader_for_fs_test(
     bin_label_vocab = Vocab.from_file(os.path.join(data_path, "bin_label_vocab.txt"))
 
     ## dev support & query
-    dev_sup_dom_data, dev_qry_dom_data = read_dev_support_and_query_data(
-        os.path.join(raw_data_path, "dev"), tokenizer,
-        domain_map, intent_map, slots_map, label_vocab, bin_label_vocab)
+    test_dom_data = read_test_data(
+        os.path.join(fin_data_path, "test"), 
+        tokenizer, domain_map, intent_map, slots_map, 
+        label_vocab, bin_label_vocab)
 
     if not sep_dom:
         fs_data = []
-        fs_sup_data = []
-        for dom in dev_sup_dom_data.keys():
-            dom_data = collect_support_instances(
-                dev_sup_dom_data[dom], dev_qry_dom_data[dom], int(n_shots))
+        for dom_data in test_dom_data.values():
             fs_data.extend(dom_data)
-            if return_suploader:
-                fs_sup_data.extend(dev_sup_dom_data[dom])
-
-        dataloader = thdata.DataLoader(dataset=Dataset(fs_data), 
-            batch_size=batch_size, shuffle=False, collate_fn=collate_fn)
-        if return_suploader:
-            suploader = thdata.DataLoader(dataset=Dataset(fs_sup_data), 
-                batch_size=batch_size, shuffle=True, collate_fn=collate_fn)
-            return dataloader, suploader
-        else:
-            return dataloader
+            
+        dataloader = thdata.DataLoader(
+                            dataset=Dataset(fs_data), 
+                            batch_size=batch_size, shuffle=False, 
+                            collate_fn=collate_fn)
+        return dataloader
     else:
         dataloaders = {}
-        suploaders = {}
-        for dom in dev_sup_dom_data.keys():
-            dom_data = collect_support_instances(
-                dev_sup_dom_data[dom], dev_qry_dom_data[dom], int(n_shots))
-            
-            dataloaders[dom] = thdata.DataLoader(dataset=Dataset(dom_data), 
-                batch_size=batch_size, shuffle=False, collate_fn=collate_fn)
-            if return_suploader:
-                suploaders[dom] = thdata.DataLoader(dataset=Dataset(dev_sup_dom_data[dom]), 
-                    batch_size=batch_size, shuffle=True, collate_fn=collate_fn)
-        if return_suploader:
-            return dataloaders, suploaders
-        else:
-            return dataloaders
+        for dom, dom_data in test_dom_data.items():
+            dataloaders[dom] = thdata.DataLoader(
+                                dataset=Dataset(dom_data), 
+                                batch_size=batch_size, shuffle=False, 
+                                collate_fn=collate_fn)
+        return dataloaders
 
 
 if __name__=='__main__':

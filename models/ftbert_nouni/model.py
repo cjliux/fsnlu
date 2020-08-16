@@ -2,7 +2,7 @@
 """
     @author: cjliux@gmail.com
     @elems: bert, mtl, feat_mask, crf, cdt, sep label
-    @status: 79.4 -> 80.59
+    @status: 
 """
 import os, sys
 import copy
@@ -95,8 +95,8 @@ class Model(nn.Module):
 
     def forward(self, batch):
         mdl_input = batch["model_input"]
-        padded_seqs, seq_lengths, dom_idxs, segids = (mdl_input["padded_seqs"],
-            mdl_input["seq_lengths"], mdl_input["dom_idxs"], mdl_input["segids"])
+        padded_seqs, seq_lengths, dom_idx, segids = (mdl_input["padded_seqs"],
+            mdl_input["seq_lengths"], mdl_input["dom_idx"], mdl_input["segids"])
 
         # seq_lengths
         max_len = seq_lengths.max().item()
@@ -121,7 +121,7 @@ class Model(nn.Module):
         bio_logits = self.bio_outputs(seq_output)
         feats = self.map_seq_feature(seq_output)
         
-        return { "dom_idxs": dom_idxs,
+        return { "dom_idx": dom_idx,
             "attn_mask": attn_mask, "dom_logits": dom_logits, 
             "int_logits": int_logits, "sl_logits": feats}
 
@@ -131,33 +131,44 @@ class Model(nn.Module):
                             mdl_input["int_idx"], mdl_input["padded_y"])
 
         loss = (2 * self.loss_fct(fwd_dict["dom_logits"], dom_idx) 
-                + 4 * self.loss_fct(fwd_dict["int_logits"], int_idx))
+                + 4 * self.loss_fct(fwd_dict["int_logits"], int_idx)).sum()
 
         seq_len = fwd_dict["sl_logits"].size(1)
 
         seq_logits, seq_mask = fwd_dict["sl_logits"][:,1:], fwd_dict["attn_mask"][:,1:]
         seq_label = padded_y[:,1:seq_len]
 
-        sl_loss = - F.log_softmax(seq_logits, -1).gather(
+        log_slprob = F.log_softmax(seq_logits, -1)
+        sl_loss = - log_slprob.gather(
                                 2, seq_label.unsqueeze(-1)).squeeze(-1)
-        loss = loss.sum() + sl_loss[seq_mask.byte()].sum()
-
+        loss = loss + sl_loss[seq_mask.byte()].sum()
         loss = loss + self.crf_layer.compute_loss(
                                 seq_logits, seq_mask, seq_label).sum()
+
+        # sl_loss = - F.log_softmax(seq_logits, -1).gather(
+        #                         2, seq_label.unsqueeze(-1)).squeeze(-1)
+        # loss = loss + sl_loss[seq_mask.byte()].sum()
+        # loss = loss + self.crf_layer.compute_loss(
+        #                         seq_logits, seq_mask, seq_label).sum()
         return loss
 
     def predict(self, batch, fwd_dict):
         mdl_input = batch["model_input"]
         seq_lengths, dom_idx = mdl_input["seq_lengths"], mdl_input["dom_idx"]
 
-        for i_sam, i_dom in enumerate(fwd_dict["dom_idxs"].tolist()):
+        for i_sam, i_dom in enumerate(fwd_dict["dom_idx"].tolist()):
             fwd_dict["int_logits"][i_sam].masked_fill_(self.dom_int_mask[i_dom], -1e9)
             fwd_dict["sl_logits"][i_sam].masked_fill_(self.dom_label_mask[i_dom], -1e9)
             
         dom_pred = torch.argmax(fwd_dict["dom_logits"], dim=-1).detach().cpu().numpy()
         int_pred = torch.argmax(fwd_dict["int_logits"], dim=-1).detach().cpu().numpy()
+
+        # _, crf_pred = self.crf_layer.inference(
+                        # F.log_softmax(fwd_dict["sl_logits"][:,1:], -1), 
+                        # fwd_dict["attn_mask"][:,1:])
         _, crf_pred = self.crf_layer.inference(
             fwd_dict["sl_logits"][:,1:], fwd_dict["attn_mask"][:,1:])
+
         lbl_pred = [[self.label_vocab.word2index['O']] 
                         + crf_pred[i, :ln-1].data.tolist() 
                             for i, ln in enumerate(seq_lengths.tolist())]

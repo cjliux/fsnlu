@@ -2,7 +2,7 @@
 """
     @author: cjliux@gmail.com
     @elems: bert, mtl, feat_mask, crf, cdt, sep label
-    @status: 79.4 -> 80.59
+    @status: 
 """
 import os, sys
 import copy
@@ -58,7 +58,6 @@ class Model(nn.Module):
 
         self.tokenizer = tokenizer
 
-        # self.bert_enc = BertModel.from_pretrained(args.bert_dir)
         self.bert_enc = BertModel.from_pretrained(
             pretrained_model_path=os.path.join(args.bert_dir, "pytorch_model.bin"),
             config_path=os.path.join(args.bert_dir, "bert_config.json"))
@@ -67,8 +66,7 @@ class Model(nn.Module):
             self.bert_enc.config.hidden_size, self.domain_map.n_words)
         self.intent_outputs = nn.Linear(
             self.bert_enc.config.hidden_size, self.intent_map.n_words)
-        # self.slots_outputs = nn.Linear(
-        #     self.bert_enc.config.hidden_size, self.label_vocab.n_words)
+        
         self.sltype_outputs = nn.Linear(
             self.bert_enc.config.hidden_size, self.slots_map.n_words+1)
         self.bio_outputs = nn.Linear(self.bert_enc.config.hidden_size, 3)
@@ -85,10 +83,21 @@ class Model(nn.Module):
         self.loss_fct = nn.CrossEntropyLoss(reduction='none')
 
         self.crf_layer = CRF(self.label_vocab)
-        # init_trans = build_init_crf_trans_bio(self.label_vocab)
-        # self.crf_layer.init_weights(init_trans)
 
-    def forward(self, padded_seqs, seq_lengths, dom_idxs, segids):
+    def map_seq_feature(self, seq_output):
+        sltype_logits = self.sltype_outputs(seq_output)
+        bio_logits = self.bio_outputs(seq_output)
+
+        batch_size, seq_len, _ = sltype_logits.size()
+        feats = (sltype_logits.index_select(-1, self.sltype_map)
+                            + bio_logits.index_select(-1, self.bio_map))
+        return feats
+
+    def forward(self, batch):
+        mdl_input = batch["model_input"]
+        padded_seqs, seq_lengths, dom_idx, segids = (mdl_input["padded_seqs"],
+            mdl_input["seq_lengths"], mdl_input["dom_idx"], mdl_input["segids"])
+
         # seq_lengths
         max_len = seq_lengths.max().item()
         idxes = torch.arange(0, max_len, out=torch.LongTensor(max_len)).unsqueeze(0)
@@ -108,78 +117,62 @@ class Model(nn.Module):
         dom_logits = self.domain_outputs(cls_output)
         int_logits = self.intent_outputs(cls_output)
         
-        # sl_logits = self.slots_outputs(seq_output)
-        
         sltype_logits = self.sltype_outputs(seq_output)
         bio_logits = self.bio_outputs(seq_output)
-
-        batch_size, seq_len, _ = sltype_logits.size()
-        feats = torch.zeros(batch_size, seq_len, self.label_vocab.n_words).cuda()
-        feats = (sltype_logits.index_select(-1, self.sltype_map) 
-                            + bio_logits.index_select(-1, self.bio_map))
-        # feats = sltype_logits.gather(-1, self.sltype_map) + bio_logits.gather(-1, self.bio_map)
+        feats = self.map_seq_feature(seq_output)
         
-        return { "dom_idxs": dom_idxs,
+        return { "dom_idx": dom_idx,
             "attn_mask": attn_mask, "dom_logits": dom_logits, 
             "int_logits": int_logits, "sl_logits": feats}
 
-    def compute_loss(self, dom_idx, int_idx, padded_y, fwd_dict):
+    def compute_loss(self, batch, fwd_dict):
+        mdl_input = batch["model_input"]
+        dom_idx, int_idx, padded_y = (mdl_input["dom_idx"], 
+                            mdl_input["int_idx"], mdl_input["padded_y"])
+
         loss = (2 * self.loss_fct(fwd_dict["dom_logits"], dom_idx) 
-                + 4 * self.loss_fct(fwd_dict["int_logits"], int_idx))
+                + 4 * self.loss_fct(fwd_dict["int_logits"], int_idx)).sum()
 
         seq_len = fwd_dict["sl_logits"].size(1)
 
         seq_logits, seq_mask = fwd_dict["sl_logits"][:,1:], fwd_dict["attn_mask"][:,1:]
         seq_label = padded_y[:,1:seq_len]
 
-        sl_loss = - F.log_softmax(seq_logits, -1).gather(
+        log_slprob = F.log_softmax(seq_logits, -1)
+        sl_loss = - log_slprob.gather(
                                 2, seq_label.unsqueeze(-1)).squeeze(-1)
-        loss = loss.sum() + sl_loss[seq_mask.byte()].sum()
-
+        loss = loss + sl_loss[seq_mask.byte()].sum()
         loss = loss + self.crf_layer.compute_loss(
-                                seq_logits, seq_mask, seq_label).sum()
+                                log_slprob, seq_mask, seq_label).sum()
+
+        # sl_loss = - F.log_softmax(seq_logits, -1).gather(
+        #                         2, seq_label.unsqueeze(-1)).squeeze(-1)
+        # loss = loss + sl_loss[seq_mask.byte()].sum()
+        # loss = loss + self.crf_layer.compute_loss(
+        #                         seq_logits, seq_mask, seq_label).sum()
         return loss
 
-    def predict(self, seq_lengths, dom_idx, fwd_dict):
-        for i_sam, i_dom in enumerate(fwd_dict["dom_idxs"].tolist()):
+    def predict(self, batch, fwd_dict):
+        mdl_input = batch["model_input"]
+        seq_lengths, dom_idx = mdl_input["seq_lengths"], mdl_input["dom_idx"]
+
+        for i_sam, i_dom in enumerate(fwd_dict["dom_idx"].tolist()):
             fwd_dict["int_logits"][i_sam].masked_fill_(self.dom_int_mask[i_dom], -1e9)
             fwd_dict["sl_logits"][i_sam].masked_fill_(self.dom_label_mask[i_dom], -1e9)
             
         dom_pred = torch.argmax(fwd_dict["dom_logits"], dim=-1).detach().cpu().numpy()
         int_pred = torch.argmax(fwd_dict["int_logits"], dim=-1).detach().cpu().numpy()
+
         _, crf_pred = self.crf_layer.inference(
-            fwd_dict["sl_logits"][:,1:], fwd_dict["attn_mask"][:,1:])
+                        F.log_softmax(fwd_dict["sl_logits"][:,1:], -1), 
+                        fwd_dict["attn_mask"][:,1:])
+        # _, crf_pred = self.crf_layer.inference(
+        #     fwd_dict["sl_logits"][:,1:], fwd_dict["attn_mask"][:,1:])
+
         lbl_pred = [[self.label_vocab.word2index['O']] 
                         + crf_pred[i, :ln-1].data.tolist() 
                             for i, ln in enumerate(seq_lengths.tolist())]
         return dom_pred, int_pred, lbl_pred
-
-
-def build_init_crf_trans_bio(label_vocab, neg_inf=-1e9):
-    # label vocab -> init_trans
-    vocab = label_vocab.get_vocab()
-    e_type_to_lbl = defaultdict(dict)
-    i_o = None
-    for i_lbl, lbl in enumerate(vocab):
-        i_hyp = lbl.find('-') 
-        if i_hyp != -1:
-            e_type_to_lbl[lbl[i_hyp+1:]][lbl[:i_hyp]] = i_lbl
-        else:
-            i_o = i_lbl
-    for e_type in e_type_to_lbl.keys():
-        e_type_to_lbl[e_type]['O'] = i_o
-
-    init_trans = {}
-    for e_type1 in e_type_to_lbl.keys():
-        for e_type2 in e_type_to_lbl.keys():
-            if e_type1 != e_type2:
-                for tag1 in ['B', 'I', 'O']:
-                    if tag1 in e_type_to_lbl[e_type1].keys() and 'I' in e_type_to_lbl[e_type2].keys():
-                        init_trans[(e_type_to_lbl[e_type2]['I'], e_type_to_lbl[e_type1][tag1])] = neg_inf  
-            else:
-                if 'O' in e_type_to_lbl[e_type1].keys() and 'I' in e_type_to_lbl[e_type2].keys():
-                    init_trans[(e_type_to_lbl[e_type2]['I'], e_type_to_lbl[e_type1]['O'])] = neg_inf
-    return init_trans
 
 
 class CRF(nn.Module):
@@ -202,14 +195,6 @@ class CRF(nn.Module):
         self.start_transitions = nn.Parameter(torch.randn(self.num_tags))
         self.stop_transitions = nn.Parameter(torch.randn(self.num_tags))
         # nn.init.xavier_normal_(self.transitions)
-
-    def init_weights(self, init_trans):
-        """
-        init_trans: dict((to:long, fr:long) -> val:float)
-        """
-        for (to, fr), val in init_trans.items():
-            self.transitions.data[to, fr].fill_(val)
-        self.valid_trans = (self.transitions != -1e9)
 
     def build_transitions(self, label_vocab):
         trans = torch.zeros(self.num_tags, self.num_tags)

@@ -3,6 +3,10 @@ import os, sys
 import json
 
 
+def apply_domain_rule(domain, dom_data):
+    return dom_data
+
+
 def add_leak(sup_data, pred_data):
     leak_lut = {}
     for item in sup_data:
@@ -18,18 +22,13 @@ def add_leak(sup_data, pred_data):
     return new_pred_data
 
 
-def apply_domain_rule(domain, dom_data):
-    return dom_data
-
-
 def main(args):
-    sup_raw_data_path = os.path.join(args.raw_data_path, "dev/support")
-    sup_files = list(sorted([f for f in os.listdir(sup_raw_data_path) if f.startswith("support")]))
+    sup_files = list(sorted([f for f in os.listdir(args.support_path) if f.startswith("support")]))
     pred_files = list(sorted([f for f in os.listdir(args.predict_path) if f.startswith("predict")]))
 
     os.makedirs(args.save_path, exist_ok=True)
     for fid, (sup_file, pred_file) in enumerate(zip(sup_files, pred_files)):
-        with open(os.path.join(sup_raw_data_path, sup_file), 'r', encoding='utf8') as fd:
+        with open(os.path.join(args.support_path, sup_file), 'r', encoding='utf8') as fd:
             sup_data = json.load(fd)
         with open(os.path.join(args.predict_path, pred_file), 'r', encoding='utf8') as fd:
             pred_data = json.load(fd)
@@ -48,10 +47,8 @@ def parse_args():
     import argparse
     parser = argparse.ArgumentParser()
 
-    parser.add_argument("--raw_data_path", type=str, 
-                    default="../data/smp2020ecdt/smp2020ecdt_task1_v2")
-    parser.add_argument("--data_path", type=str, 
-                    default="./data/default_v2")
+    parser.add_argument("--support_path", type=str, 
+                    default="../data/smp2020ecdt/test_support_v4/support")
     parser.add_argument("--predict_path", type=str, required=True)
     parser.add_argument("--save_path", type=str, required=True)
 

@@ -5,7 +5,7 @@ import random
 import numpy as np
 
 from models.pnbert.config import add_parser_args
-from models.pnbert.pninterface2_1 import do_pn_train_no_eval
+from models.pnbert.interface import do_pn_train_no_eval
 
 
 def parse_args():

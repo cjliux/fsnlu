@@ -7,14 +7,21 @@ import copy
 import re
 
 
-test_dom_map = {0: "temperature", 1: "wordFinding", 
-            2: "joke", 3: "holiday", 4: "garbageClassify"}
+# test_dom_map = {
+#     0: "temperature", 
+#     1: "wordFinding", 
+#     2: "joke", 
+#     3: "holiday", 
+#     4: "garbageClassify"
+# }
 
 
 def parse_args():
     import argparse 
     parser = argparse.ArgumentParser()
-    parser.add_argument("--data_path", type=str, default="./data/default_v2")
+    parser.add_argument("--data_path", type=str, default="./data/default_v4")
+    parser.add_argument("--save_path", type=str, default="./ensemble")
+    parser.add_argument("--predict_dirs", nargs='+')
     return parser.parse_args()
 
 
@@ -25,18 +32,22 @@ def read_schema(data_path):
     return schm
 
 
-def ensemble(args, dirs, schm):
-    for file in range(5):
-        dom_schm = schm[test_dom_map[file]]
+def ensemble(args, schm):
+    print('ensembling:', args.predict_dirs)
+    fname = [f for f in os.listdir(args.predict_dirs[0]) if f.endswith('.json')]
 
+    for file in range(len(fname)):
         result = []
         data = []  # init the file 
         
-        for s_dir in dirs:
+        for s_dir in args.predict_dirs:
             rdata = json.load(open(s_dir + "/predict_" + str(file) + ".json", encoding="utf8"))
             # rdata = list(sorted(rdata, key=lambda x: x["id"]))
             data.append(rdata)
-            
+        
+        dom_name = data[0][0]["domain"]
+        dom_schm = schm[dom_name]
+
         for i in range(len(data[0])):
             exp = {}
             int_count, slot_count = {}, {}
@@ -95,26 +106,28 @@ def ensemble(args, dirs, schm):
             result.append(exp)
 
         # return result
-        os.makedirs("ensemble", exist_ok=True)
-        with open("ensemble/predict_"+str(file)+".json", 'w', encoding = 'utf-8') as fd:
+        os.makedirs(args.save_path, exist_ok=True)
+        with open(os.path.join(args.save_path, "predict_"+str(file)+".json"), 
+                                                    'w', encoding = 'utf-8') as fd:
             json.dump(result, fd, ensure_ascii = False, indent = 2)
 
 
 if __name__ == "__main__":
-    # dirs = ["data/v2/dev/result_5_5", "data/v2/dev/result_d1_dict", "data/v2/dev/result4"]
-    # dirs = ["whr_results/dev/result_5_5", 
-    #     "whr_results/dev/result_d1_dict", 
-    #     "whr_results/dev/result4"]
+    # dirs = [
+    #     "pnbert_exp/pnbert/ecdt_pn_comb/predict", 
+    #     "pnbert_exp/pnbert/ecdt_pn_comb_2_1/predict", 
+    #     "pnbert_exp/pnbert/ecdt_comb/predict",
+    #     "whr_results/dev/result_5_5",
+    # ]
 
-    dirs = [
-        "pnbert_exp/pnbert/ecdt_pn_comb/predict", 
-        "pnbert_exp/pnbert/ecdt_pn_comb_2_1/predict", 
-        "pnbert_exp/pnbert/ecdt_comb/predict",
-        "whr_results/dev/result_5_5",
-    ]
+    # dirs = [
+    #     "ftbert_final_exp/ftbert_final/local/predict",
+    #     "ftbert_final_nodict_exp/ftbert_final/local/predict",
+    # ]
+
     args = parse_args()
     import ipdb
     with ipdb.launch_ipdb_on_exception():
         schm = read_schema(args.data_path)
-        ensemble(args, dirs, schm)
+        ensemble(args, schm)
 

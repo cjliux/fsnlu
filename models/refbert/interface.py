@@ -13,7 +13,7 @@ import pickle
 import logging
 from collections import defaultdict
 
-from .model_3_1 import Model
+from .model import Model
 from .data import (get_dataloader, get_dataloader_for_fs_train, 
     get_dataloader_for_fs_eval, get_dataloader_for_fs_test)
 from .tokenization import BertTokenizer
@@ -21,22 +21,22 @@ from .optimization import BertAdam, WarmupLinearSchedule
 from utils.nertools import collect_named_entities
 from utils.vocab import Vocab
 from utils.scaffold import get_output_dir, init_logger
-from utils.conll2002_metrics import conll2002_measure as conll_eval
-from evaluation_v2_1 import cal_sentence_acc
+# from utils.conll2002_metrics import conll2002_measure as conll_eval
+from evaluation import cal_sentence_acc
 
 logger = logging.getLogger()
 
 
-from .interface import evaluate
-
-
-def pn_evaluate(model, eval_loader, verbose=True):
+def pn_evaluate(args, model, eval_loader, verbose=True):
     int_preds, int_golds = [], []
     lbl_preds, lbl_golds = [], []
     final_items = []
 
     model.eval()
-    pbar = tqdm.tqdm(enumerate(eval_loader), total=len(eval_loader))
+    if args.no_pbar:
+        pbar = enumerate(eval_loader)
+    else:
+        pbar = tqdm.tqdm(enumerate(eval_loader), total=len(eval_loader))
     for i, batch in pbar:
         qry_input = batch["model_input"]
         for k, v in qry_input.items():
@@ -73,41 +73,12 @@ def pn_evaluate(model, eval_loader, verbose=True):
                 item["slots"] = slvals
                 final_items.append(item)
 
-    # ## compute scores
-    # scores = {}
-    # # int f1 score
-    # ma_icnt = defaultdict(lambda: defaultdict(int))
-    # for pint, gint in zip(int_preds, int_golds):
-    #     pint = model.intent_map.index2word[pint]
-    #     gint = model.intent_map.index2word[gint]
-    #     if pint == gint:
-    #         ma_icnt[pint]['tp'] += 1
-    #     else:
-    #         ma_icnt[pint]['fp'] += 1
-    #         ma_icnt[gint]['fn'] += 1
-    # scores['ma_if1'] = sum(
-    #     2 * float(ic['tp']) / float(2 * ic['tp'] + ic['fp'] + ic['fn']) 
-    #     for ic in ma_icnt.values()) / len(ma_icnt)
-
-    # # lbl f1 score
-    # lbl_preds = np.concatenate(lbl_preds)
-    # lbl_golds = np.concatenate(lbl_golds)
-    # lines = [ "w " + model.label_vocab.index2word[plb] 
-    #             + " " + model.label_vocab.index2word[glb] 
-    #                 for plb, glb in zip(lbl_preds, lbl_golds)]
-    # scores['lbl_conll_f1'] = conll_eval(lines)['fb1']
-
-    # score = (2 * scores['ma_if1'] * scores['lbl_conll_f1']) / (
-    #                 scores['ma_if1'] + scores['lbl_conll_f1'] + 1e-10)
-    
     (sent_acc, macro_intent_acc, micro_intent_acc, 
         macro_f1, micro_f1) = cal_sentence_acc(
             eval_loader.dataset.qry_data, final_items)
 
     if verbose:
         buf = "[Eval] "
-        # for k, v in scores.items():
-        #     buf += "{}: {:.6f}; ".format(k, v)
         buf += "se_acc {:.6f}; ma_int {:.6f} | mi_int {:.6f}; ma_sl {:.6f} | mi_sl {:.6f}".format(
             sent_acc, macro_intent_acc, micro_intent_acc, macro_f1, micro_f1)
         logger.info(buf)
@@ -131,7 +102,11 @@ def pn_train(args, model, optimizer,
     for epo in range(args.max_epoch):
         model.train()
         sup_loss_list = []
-        pbar = tqdm.tqdm(enumerate(comb_sup_loader), total=len(comb_sup_loader))
+        if args.no_pbar:
+            pbar = enumerate(comb_sup_loader)
+            period = int(len(comb_sup_loader) * 0.1)
+        else:
+            pbar = tqdm.tqdm(enumerate(comb_sup_loader), total=len(comb_sup_loader))
         for step, sup_batch in pbar:
             sup_input = sup_batch["model_input"]
             for k, v in sup_input.items():
@@ -146,11 +121,20 @@ def pn_train(args, model, optimizer,
             optimizer.step()
 
             sup_loss_list.append(sup_loss.item())
-            pbar.set_description("(Epo {}) sup_loss:{:.4f}".format(epo+1, np.mean(sup_loss_list)))
+            msg = "(Epo {}) sup_loss:{:.4f}".format(epo+1, np.mean(sup_loss_list))
+            if not args.no_pbar:
+                pbar.set_description(msg)
+            elif (step+1) % period == 0:
+                logger.info(msg + " [{}/{}({:.2f}%)]".format(
+                    step+1, len(comb_sup_loader), 100 * float(step+1)/len(comb_sup_loader)))
 
         model.train()
         qry_loss_list = []
-        pbar = tqdm.tqdm(enumerate(comb_qry_loader), total=len(comb_qry_loader))
+        if args.no_pbar:
+            pbar = enumerate(comb_qry_loader)
+            period = int(len(comb_qry_loader) * 0.1)
+        else:
+            pbar = tqdm.tqdm(enumerate(comb_qry_loader), total=len(comb_qry_loader))
         for step, qry_batch in pbar:
             qry_input = qry_batch["model_input"]
             for k, v in qry_input.items():
@@ -165,13 +149,18 @@ def pn_train(args, model, optimizer,
             optimizer.step()
 
             qry_loss_list.append(qry_loss.item())
-            pbar.set_description("(Epo {}) qry_loss:{:.4f}".format(epo+1, np.mean(qry_loss_list)))
+            msg = "(Epo {}) qry_loss:{:.4f}".format(epo+1, np.mean(qry_loss_list))
+            if not args.no_pbar:
+                pbar.set_description(msg)
+            elif (step+1) % period == 0:
+                logger.info(msg + " [{}/{}({:.2f}%)]".format(
+                    step+1, len(comb_qry_loader), 100 * float(step+1)/len(comb_qry_loader)))
 
         # epo eval
         if do_eval:
             logger.info("============== Evaluate Epoch {} ==============".format(epo+1))
-            # pn_evaluate(model, comb_qry_loader) 
-            score = pn_evaluate(model, eval_loader)
+            # pn_evaluate(args, model, comb_qry_loader) 
+            score = pn_evaluate(args, model, eval_loader)
             if score > best_score:
                 best_score, patience = score, 0
                 logger.info("Found better model!!")
@@ -256,7 +245,9 @@ def do_pn_train_no_eval(args):
 
 def do_pn_predict(args):
     args.dump_path = get_output_dir(args.dump_path, args.exp_name, args.exp_id)
-    model_path = os.path.join(args.dump_path, args.target)
+    model_path = (os.path.join(args.model_path, args.target) 
+                                if args.model_path is not None 
+                                else os.path.join(args.dump_path, args.target))
     save_dir = args.save_dir if args.save_dir is not None else args.dump_path
 
     tokenizer = BertTokenizer.from_pretrained(
@@ -274,12 +265,16 @@ def do_pn_predict(args):
 
         state_dict = torch.load(model_path.format(dom))
         model.load_state_dict(state_dict["model"])
+        model.eval()
 
         final_items = []
         int_preds, int_golds = [], []
         lbl_preds, lbl_golds = [], []
 
-        pbar = tqdm.tqdm(enumerate(test_loader), total=len(test_loader))
+        if args.no_pbar:
+            pbar = enumerate(test_loader)
+        else:
+            pbar = tqdm.tqdm(enumerate(test_loader), total=len(test_loader))
         for i, qry_batch in pbar:
             qry_input = qry_batch["model_input"]
             for k, v in qry_input.items():

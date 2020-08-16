@@ -1,7 +1,8 @@
 #coding: utf-8
 """
     @author: cjliux@gmail.com
-    @elems: bert, mtl, feat_mask, crf, cdt
+    @elems: bert, mtl, feat_mask, crf, cdt, sep label
+    @status: 
 """
 import os, sys
 import copy
@@ -18,6 +19,7 @@ from .optimization import BertAdam, WarmupLinearSchedule
 from utils.vocab import Vocab
 
 logger = logging.getLogger()
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 
 class Model(nn.Module):
@@ -40,7 +42,7 @@ class Model(nn.Module):
         for i_dom, dom in enumerate(self.domain_map._vocab):
             dom_int_mask[i_dom] = torch.ByteTensor([
                 0 if self.intent_map.index2word[i] in self.dom2intents[dom] else 1 
-                    for i in range(self.intent_map.n_words)]).cuda()
+                    for i in range(self.intent_map.n_words)]).to(device)
         self.dom_int_mask = dom_int_mask
 
         dom_label_mask = {}
@@ -52,165 +54,55 @@ class Model(nn.Module):
                     self.label_vocab.word2index['I-' + sl]])
             dom_label_mask[i_dom] = torch.LongTensor([
                 0 if i in cand_labels else 1 for i in range(self.label_vocab.n_words)
-            ]).byte().cuda()
+            ]).bool().to(device)
         self.dom_label_mask = dom_label_mask
 
         self.tokenizer = tokenizer
 
-        # self.bert_enc = BertModel.from_pretrained(args.bert_dir)
         self.bert_enc = BertModel.from_pretrained(
             pretrained_model_path=os.path.join(args.bert_dir, "pytorch_model.bin"),
             config_path=os.path.join(args.bert_dir, "bert_config.json"))
-        # # curated bert
-        # self.bert_enc.token_type_embeddings = nn.Embedding(
-        #     2 + self.label_vocab.n_words, self.bert_enc.config.hidden_size)
-
-        self.dropout = nn.Dropout(p = 0.1)
 
         self.domain_outputs = nn.Linear(
             self.bert_enc.config.hidden_size, self.domain_map.n_words)
         self.intent_outputs = nn.Linear(
             self.bert_enc.config.hidden_size, self.intent_map.n_words)
         
-        ## prior slots
         self.sltype_outputs = nn.Linear(
             self.bert_enc.config.hidden_size, self.slots_map.n_words+1)
         self.bio_outputs = nn.Linear(self.bert_enc.config.hidden_size, 3)
         
         self.sltype_map = torch.LongTensor(
             [self.slots_map.word2index[lbl[2:]] + 1 if lbl != 'O' else 0
-                    for lbl in self.label_vocab._vocab ]).cuda()
+                    for lbl in self.label_vocab._vocab ]).to(device)
         m = {'O': 0, 'B': 1, 'I':2}
         self.bio_map = torch.LongTensor(
-            [m[lbl[0]] for lbl in self.label_vocab._vocab]).cuda()
+            [m[lbl[0]] for lbl in self.label_vocab._vocab]).to(device)
 
-        self.align_trans = nn.Linear(
-            self.bert_enc.config.hidden_size, self.bert_enc.config.hidden_size)
+        self.dropout = nn.Dropout(p = 0.1)
         
         self.loss_fct = nn.CrossEntropyLoss(reduction='none')
+
         self.crf_layer = CRF(self.label_vocab)
 
-    def get_proto_dict(self, sup_batches):
-        batch_size = len(sup_batches)
-        seq_lengths = torch.stack(tuple(b["model_input"]["seq_lengths"] for b in sup_batches))
-        max_len = seq_lengths.max().item()
-
-        idxes = torch.arange(max_len, 
-            out=torch.LongTensor(max_len)).unsqueeze(0).unsqueeze(0)
-        attn_mask = (idxes < seq_lengths.unsqueeze(-1)).float()
-
-        def pad_and_stack_seq(seqs, max_len):
-            batch_size, sup_size = len(seqs), seqs[0].size(0)
-            v = torch.zeros(batch_size, sup_size, max_len).long()
-            for i_sam in range(batch_size):
-                v[i_sam, :, :seqs[i_sam].size(1)] = seqs[i_sam]
-            return v
-
-        padded_seqs = pad_and_stack_seq([b["model_input"]["padded_seqs"] 
-            for b in sup_batches], max_len)
-        padded_y = pad_and_stack_seq([b["model_input"]["padded_y"] 
-            for b in sup_batches], max_len)
-        padded_bin_y = pad_and_stack_seq([b["model_input"]["padded_bin_y"] 
-            for b in sup_batches], max_len)
-        segids = pad_and_stack_seq([b["model_input"]["segids"] 
-            for b in sup_batches], max_len)
-        
-        dom_idx = torch.stack(tuple(b["model_input"]["dom_idx"] for b in sup_batches))
-        int_idx = torch.stack(tuple(b["model_input"]["int_idx"] for b in sup_batches))
-        
-        return { "padded_seqs": padded_seqs.cuda(), "padded_y": padded_y.cuda(), 
-                 "padded_bin_y": padded_bin_y.cuda(), "segids": segids.cuda(), 
-                 "dom_idx": dom_idx.cuda(), "int_idx": int_idx.cuda(),
-                 "attention_mask": attn_mask.cuda(), }
-
-    def get_one_hot_repr(self, label_ids, label_voc):
-        return F.one_hot(label_ids, label_voc.n_words)
-
-    def map_seq_feature(self, lin_sltype, lin_bio, seq_output):
-        sltype_logits = lin_sltype(seq_output)
-        bio_logits = lin_bio(seq_output)
+    def map_seq_feature(self, seq_output):
+        sltype_logits = self.sltype_outputs(seq_output)
+        bio_logits = self.bio_outputs(seq_output)
 
         batch_size, seq_len, _ = sltype_logits.size()
         feats = (sltype_logits.index_select(-1, self.sltype_map)
                             + bio_logits.index_select(-1, self.bio_map))
         return feats
 
-    def attention_on_supset(self, query, key, value, mask):
-        scores_ = torch.matmul(
-            self.align_trans(query.unsqueeze(1)), key.transpose(-1,-2))
-        scores_.masked_fill_((1 - mask.unsqueeze(-2)).byte(), -1e9)
-        context = torch.matmul(F.softmax(scores_, -1), value)
-        return context # B1B2S1D
-
-    def encode_with_proto(self, batch):
-        proto_dict = self.get_proto_dict(batch["support"])
-
+    def forward(self, batch):
         mdl_input = batch["model_input"]
-        padded_seqs, seq_lengths, segids = (mdl_input["padded_seqs"], 
-                            mdl_input["seq_lengths"], mdl_input["segids"])
-        batch_size, sup_size, sup_len = proto_dict["padded_seqs"].size()
+        padded_seqs, seq_lengths, dom_idx, segids = (mdl_input["padded_seqs"],
+            mdl_input["seq_lengths"], mdl_input["dom_idx"], mdl_input["segids"])
 
         # seq_lengths
         max_len = seq_lengths.max().item()
         idxes = torch.arange(0, max_len, out=torch.LongTensor(max_len)).unsqueeze(0)
-        attn_mask = (idxes.cuda() < seq_lengths.unsqueeze(1)).float()
-
-        if padded_seqs.size(1) > max_len:
-            padded_seqs = padded_seqs[:, :max_len]
-            segids = segids[:, :max_len]
-
-        # encode sup
-        sup_seq, sup_cls = self.bert_enc(
-            input_ids=proto_dict["padded_seqs"].view(batch_size*sup_size, sup_len),
-            token_type_ids=proto_dict["segids"].view(batch_size*sup_size, sup_len),
-            attention_mask=proto_dict["attention_mask"].view(batch_size*sup_size, sup_len),
-            output_all_encoded_layers=False) # BSD, BD
-        sup_seq = sup_seq.contiguous().view(batch_size, sup_size, sup_len, -1)
-        sup_cls = sup_cls.contiguous().view(batch_size, sup_size, -1)
-
-        sup_lblrepr = self.get_one_hot_repr(
-            proto_dict["padded_y"].view(batch_size*sup_size, sup_len), 
-            self.label_vocab) # BSD
-        sup_lblrepr = sup_lblrepr.contiguous().view(batch_size, sup_size, sup_len, -1)
-        # k: sup_seq; v: sup_lblrepr
-
-        # encode qry 
-        seq_output, cls_output = self.bert_enc(
-            input_ids=padded_seqs,
-            token_type_ids=segids,
-            attention_mask=attn_mask,
-            output_all_encoded_layers=False)
-
-        cls_output = self.dropout(cls_output)
-        seq_output = self.dropout(seq_output)
-
-        dom_logits = self.domain_outputs(cls_output)
-        int_logits = self.intent_outputs(cls_output)
-
-        feats = self.map_seq_feature(
-            self.sltype_outputs, self.bio_outputs, seq_output)
-
-        # cross attention
-        sup_lblinfo = self.attention_on_supset(
-            seq_output, sup_seq, sup_lblrepr.float(), 
-            proto_dict["attention_mask"]) # B1B2S1D
-        sup_alpha = F.softmax(torch.matmul(sup_cls, cls_output.unsqueeze(-1)).squeeze(-1), 1)
-        lbl_info = sup_alpha.unsqueeze(-1).unsqueeze(-1).expand_as(
-                                    sup_lblinfo).mul(sup_lblinfo).sum(1)
-
-        return {"attn_mask": attn_mask, "dom_logits": dom_logits, 
-                "int_logits": int_logits, "sl_logits": feats, "lbl_info": lbl_info,
-                "proto_dict": proto_dict } 
-
-    def encode_without_proto(self, batch):
-        mdl_input = batch["model_input"]
-        padded_seqs, seq_lengths, segids = (mdl_input["padded_seqs"], 
-                            mdl_input["seq_lengths"], mdl_input["segids"])
-
-        # seq_lengths
-        max_len = seq_lengths.max().item()
-        idxes = torch.arange(0, max_len, out=torch.LongTensor(max_len)).unsqueeze(0)
-        attn_mask = (idxes.cuda() < seq_lengths.unsqueeze(1)).float()
+        attn_mask = (idxes.to(device) < seq_lengths.unsqueeze(1)).float()
 
         if padded_seqs.size(1) > max_len:
             padded_seqs = padded_seqs[:, :max_len]
@@ -226,20 +118,21 @@ class Model(nn.Module):
         dom_logits = self.domain_outputs(cls_output)
         int_logits = self.intent_outputs(cls_output)
         
-        feats = self.map_seq_feature(
-            self.sltype_outputs, self.bio_outputs, seq_output)
-
-        return { "attn_mask": attn_mask, "dom_logits": dom_logits, 
-                 "int_logits": int_logits, "sl_logits": feats}
+        sltype_logits = self.sltype_outputs(seq_output)
+        bio_logits = self.bio_outputs(seq_output)
+        feats = self.map_seq_feature(seq_output)
+        
+        return { "dom_idx": dom_idx,
+            "attn_mask": attn_mask, "dom_logits": dom_logits, 
+            "int_logits": int_logits, "sl_logits": feats}
 
     def compute_loss(self, batch, fwd_dict):
         mdl_input = batch["model_input"]
-        dom_idx, int_idx, padded_y = (
-            mdl_input["dom_idx"], mdl_input["int_idx"], mdl_input["padded_y"])
+        dom_idx, int_idx, padded_y = (mdl_input["dom_idx"], 
+                            mdl_input["int_idx"], mdl_input["padded_y"])
 
-        # qry
         loss = (2 * self.loss_fct(fwd_dict["dom_logits"], dom_idx) 
-                + 4 * self.loss_fct(fwd_dict["int_logits"], int_idx))
+                + 4 * self.loss_fct(fwd_dict["int_logits"], int_idx)).sum()
 
         seq_len = fwd_dict["sl_logits"].size(1)
 
@@ -249,71 +142,34 @@ class Model(nn.Module):
         log_slprob = F.log_softmax(seq_logits, -1)
         sl_loss = - log_slprob.gather(
                                 2, seq_label.unsqueeze(-1)).squeeze(-1)
-        loss = loss.sum() + sl_loss[seq_mask.byte()].sum()
-
+        loss = loss + sl_loss[seq_mask.bool()].sum()
         loss = loss + self.crf_layer.compute_loss(
                                 log_slprob, seq_mask, seq_label).sum()
-        return loss
 
-    def compute_postr_loss(self, batch, fwd_dict):
-        mdl_input = batch["model_input"]
-        dom_idx, int_idx, padded_y = (
-            mdl_input["dom_idx"], mdl_input["int_idx"], mdl_input["padded_y"])
-
-        # qry
-        loss = (2 * self.loss_fct(fwd_dict["dom_logits"], dom_idx) 
-                + 4 * self.loss_fct(fwd_dict["int_logits"], int_idx))
-
-        seq_len = fwd_dict["sl_logits"].size(1)
-
-        seq_label = padded_y[:,1:seq_len]
-        feats, seq_mask = fwd_dict["sl_logits"][:,1:], fwd_dict["attn_mask"][:,1:]
-        # seq_pfeats = fwd_dict["postr_feats"][:,1:]
-        lbl_info = fwd_dict["lbl_info"][:,1:]
-
-        log_slprob = torch.log((F.softmax(feats, -1) + lbl_info) / 2)
-        sl_loss = - log_slprob.gather(
-                                2, seq_label.unsqueeze(-1)).squeeze(-1)
-        loss = loss.sum() + sl_loss[seq_mask.byte()].sum()
-
-        # log_slprob = F.log_softmax(seq_pfeats, -1)
-        log_slprob = torch.log((F.softmax(feats, -1) + lbl_info) / 2)
-        loss = loss + self.crf_layer.compute_loss(
-                                log_slprob, seq_mask, seq_label).sum()
+        # sl_loss = - F.log_softmax(seq_logits, -1).gather(
+        #                         2, seq_label.unsqueeze(-1)).squeeze(-1)
+        # loss = loss + sl_loss[seq_mask.bool()].sum()
+        # loss = loss + self.crf_layer.compute_loss(
+        #                         seq_logits, seq_mask, seq_label).sum()
         return loss
 
     def predict(self, batch, fwd_dict):
         mdl_input = batch["model_input"]
         seq_lengths, dom_idx = mdl_input["seq_lengths"], mdl_input["dom_idx"]
 
-        for i_sam, i_dom in enumerate(dom_idx.tolist()):
-            fwd_dict["int_logits"][i_sam].masked_fill_(self.dom_int_mask[i_dom], -1e9)
-            fwd_dict["sl_logits"][i_sam].masked_fill_(self.dom_label_mask[i_dom], -1e9)
-
+        for i_sam, i_dom in enumerate(fwd_dict["dom_idx"].tolist()):
+            fwd_dict["int_logits"][i_sam].masked_fill_(self.dom_int_mask[i_dom].bool(), -1e9)
+            fwd_dict["sl_logits"][i_sam].masked_fill_(self.dom_label_mask[i_dom].bool(), -1e9)
+            
         dom_pred = torch.argmax(fwd_dict["dom_logits"], dim=-1).detach().cpu().numpy()
         int_pred = torch.argmax(fwd_dict["int_logits"], dim=-1).detach().cpu().numpy()
-        log_slprob = F.log_softmax(fwd_dict["sl_logits"][:,1:], -1)
-        _, crf_pred = self.crf_layer.inference(log_slprob, fwd_dict["attn_mask"][:,1:])
-        lbl_pred = [[self.label_vocab.word2index['O']] 
-                        + crf_pred[i, :ln-1].data.tolist() 
-                            for i, ln in enumerate(seq_lengths.tolist())]
-        return dom_pred, int_pred, lbl_pred
 
-    def predict_postr(self, batch, fwd_dict):
-        mdl_input = batch["model_input"]
-        seq_lengths, dom_idx = mdl_input["seq_lengths"], mdl_input["dom_idx"]
+        _, crf_pred = self.crf_layer.inference(
+                        F.log_softmax(fwd_dict["sl_logits"][:,1:], -1), 
+                        fwd_dict["attn_mask"][:,1:])
+        # _, crf_pred = self.crf_layer.inference(
+        #     fwd_dict["sl_logits"][:,1:], fwd_dict["attn_mask"][:,1:])
 
-        for i_sam, i_dom in enumerate(dom_idx.tolist()):
-            fwd_dict["int_logits"][i_sam].masked_fill_(self.dom_int_mask[i_dom], -1e9)
-            fwd_dict["sl_logits"][i_sam].masked_fill_(self.dom_label_mask[i_dom], -1e9)
-
-        dom_pred = torch.argmax(fwd_dict["dom_logits"], dim=-1).detach().cpu().numpy()
-        int_pred = torch.argmax(fwd_dict["int_logits"], dim=-1).detach().cpu().numpy()
-        
-        # log_slprob = F.log_softmax(fwd_dict["postr_feats"][:,1:], -1)
-        log_slprob = torch.log(
-            (F.softmax(fwd_dict["sl_logits"][:,1:], -1) + fwd_dict["lbl_info"][:,1:]) / 2)
-        _, crf_pred = self.crf_layer.inference(log_slprob, fwd_dict["attn_mask"][:,1:])
         lbl_pred = [[self.label_vocab.word2index['O']] 
                         + crf_pred[i, :ln-1].data.tolist() 
                             for i, ln in enumerate(seq_lengths.tolist())]
@@ -341,14 +197,6 @@ class CRF(nn.Module):
         self.stop_transitions = nn.Parameter(torch.randn(self.num_tags))
         # nn.init.xavier_normal_(self.transitions)
 
-    def init_weights(self, init_trans):
-        """
-        init_trans: dict((to:long, fr:long) -> val:float)
-        """
-        for (to, fr), val in init_trans.items():
-            self.transitions.data[to, fr].fill_(val)
-        self.valid_trans = (self.transitions != -1e9)
-
     def build_transitions(self, label_vocab):
         trans = torch.zeros(self.num_tags, self.num_tags)
         m1 = {'O':0, 'B':1, 'I':2}
@@ -357,7 +205,7 @@ class CRF(nn.Module):
                 if li != 'O' and li[2:] != lj[2:] 
                 else [m1[li[0]], m1[lj[0]]] for lj in label_vocab._vocab] 
                                             for li in label_vocab._vocab]
-        types = torch.LongTensor(types).cuda().permute(2,0,1)
+        types = torch.LongTensor(types).to(device).permute(2,0,1)
         transitions = self.cdt_transitions[types[0], types[1]]
         return transitions.contiguous().view(self.num_tags, self.num_tags)
 
@@ -372,7 +220,7 @@ class CRF(nn.Module):
         Returns:
             final_partition: (batch_size)
         """
-        mask = mask.byte()
+        mask = mask.bool()
         batch_size, seq_len, tag_size = feats.size()
         
         mask = mask.transpose(1, 0).contiguous()
@@ -406,7 +254,7 @@ class CRF(nn.Module):
             decode_idx: (batch_size, seq_len), viterbi decode结果
             path_score: size=(batch_size, 1), 每个句子的得分
         """
-        mask = mask.byte()
+        mask = mask.bool()
         batch_size, seq_len, tag_size = feats.size()
         
         length_mask = torch.sum(mask, dim=1).view(batch_size, 1).long()
@@ -419,7 +267,7 @@ class CRF(nn.Module):
         partition_history = list()
 
         # mask = 1 + (-1) * mask
-        inv_mask = (1 - mask.long()).byte()
+        inv_mask = (1 - mask.long()).bool()
         
         partition = feats[0] + self.start_transitions.unsqueeze(0)
         partition_history.append(partition)
@@ -431,7 +279,7 @@ class CRF(nn.Module):
             partition, cur_bp = torch.max(cur_values, 1)
             partition_history.append(partition)
 
-            cur_bp.masked_fill_(inv_mask[idx].view(batch_size, 1), 0)
+            cur_bp.masked_fill_(inv_mask[idx].view(batch_size, 1).bool(), 0)
             back_points.append(cur_bp)
 
         partition_history = torch.cat(partition_history).view(
@@ -444,7 +292,7 @@ class CRF(nn.Module):
         last_values = last_partition + self.stop_transitions.unsqueeze(0)
         path_score, last_bp = torch.max(last_values, 1)
 
-        pad_zero = torch.zeros(batch_size, tag_size).long().cuda()
+        pad_zero = torch.zeros(batch_size, tag_size).long().to(device)
         back_points.append(pad_zero)
         back_points = torch.cat(back_points).view(seq_len, batch_size, tag_size)
         back_points = back_points.transpose(1, 0).contiguous()
@@ -455,7 +303,7 @@ class CRF(nn.Module):
 
         back_points = back_points.transpose(1, 0).contiguous()
 
-        decode_idx = torch.LongTensor(seq_len, batch_size).cuda()
+        decode_idx = torch.LongTensor(seq_len, batch_size).to(device)
         decode_idx[-1] = pointer.data
         for idx in range(len(back_points)-2, -1, -1):
             pointer = torch.gather(back_points[idx], 1, pointer.contiguous().view(batch_size, 1))
@@ -474,7 +322,7 @@ class CRF(nn.Module):
         Returns:
             score:
         """
-        mask = mask.byte()
+        mask = mask.bool()
         batch_size, seq_len, tag_size = feats.size()
         
         feat_score = (feats.gather(2, tags.unsqueeze(-1)).squeeze(-1) * mask.float()).sum(-1)
