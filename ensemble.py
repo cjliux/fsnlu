@@ -90,17 +90,28 @@ def ensemble(args, schm):
                 all_vals = sorted(list(slots.values()) + [vv], 
                             key=lambda x: len(x), reverse=True)
                 for v in all_vals:
-                    i = text.find(v)
-                    if i == -1:
-                        return False
-                    else:
-                        text = text.replace(v, "XXX", 1)
+                    if not isinstance(v, list):
+                        v = [v]
+                    for vv in v:
+                        i = text.find(vv)
+                        if i == -1:
+                            return False
+                        else:
+                            text = text.replace(vv, "XXX", 1)
                 return True
 
             slot_count = sorted(slot_count.items(), key=lambda x: x[1], reverse=True)
             for slvv, cnt in slot_count:
-                if slvv[0] not in slots.keys() and sat_value_set(slvv[1]):
-                    slots[slvv[0]] = slvv[1]
+                # if slvv[0] not in slots.keys() and sat_value_set(slvv[1]):
+                if sat_value_set(slvv[1]):
+                    if slvv[0] in slots.keys():
+                        if not isinstance(slots[slvv[0]], list):
+                            slots[slvv[0]] = [slots[slvv[0]]]
+                        if slvv[1] not in slots[slvv[0]]:
+                            slots[slvv[0]].append(slvv[1])
+                    else:
+                        slots[slvv[0]] = slvv[1]
+
             exp["slots"] = slots
 
             result.append(exp)
@@ -113,19 +124,13 @@ def ensemble(args, schm):
 
 
 if __name__ == "__main__":
-    # dirs = [
-    #     "pnbert_exp/pnbert/ecdt_pn_comb/predict", 
-    #     "pnbert_exp/pnbert/ecdt_pn_comb_2_1/predict", 
-    #     "pnbert_exp/pnbert/ecdt_comb/predict",
-    #     "whr_results/dev/result_5_5",
-    # ]
-
-    # dirs = [
-    #     "ftbert_final_exp/ftbert_final/local/predict",
-    #     "ftbert_final_nodict_exp/ftbert_final/local/predict",
-    # ]
-
     args = parse_args()
+
+    args.predict_dirs = [
+        "ftbert_final_exp/ftbert_final/local/predict",
+        "ftbert_final_nodict_exp/ftbert_final/local/predict",
+    ]
+    
     import ipdb
     with ipdb.launch_ipdb_on_exception():
         schm = read_schema(args.data_path)

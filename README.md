@@ -18,6 +18,8 @@ Developed on the event of [SMP 2020 ECDT Task1](https://mp.weixin.qq.com/s/_dE7k
 python >= 3.6
 pytorch
 embeddings
+pkuseg
+jieba
 ```
 
 
@@ -106,10 +108,11 @@ For vscode user, here are some example configurations:
 
 ## Contributors
 * [Changjian Liu](mailto:cjliux@gmail.com) (Harbin Institute of Technology, Shenzhen)
+* [Hongru Wang](mailto:hrwang@cse.cuhk.edu.hk) (The Chinese University of Hong Kong)
 * et al.
 
 ## References
-We thanks all authors of the involved models for sharing their code and data. Here are the list of works that we refer to and repositories that we heavily borrow from:
+We thanks all authors of the involved models for sharing their code and data. Here are the list of works that we refer to and repositories that we may have heavily borrow from:
 - Coach: A Coarse-to-Fine Approach for Cross-domain Slot Filling. ([code](https://github.com/zliucr/coach))
 - [Few-shot Slot Tagging with Collapsed Dependency Transfer and Label-enhanced Task-adaptive Projection Network](https://atmahou.github.io/attachments/atma's_acl2020_FewShot.pdf) ([code](https://github.com/AtmaHou/FewShotTagging))
 
