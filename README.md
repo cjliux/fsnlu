@@ -50,7 +50,7 @@ For command line user, here are some scripts for invoking a program:
 For vscode user, here are some example configurations:
 ```json
 {
-    "name": "fsnlu_fscoach_train",
+    "name": "fsnlu_train",
     "type": "python",
     "request": "launch",
     "program": "${workspaceFolder}/fsnlu/train.py",
@@ -60,25 +60,21 @@ For vscode user, here are some example configurations:
         "PYTHONPATH": "${workspaceFolder}/fsnlu/",
     },
     "args": [
-        "--exp_name", "coach_lstmenc",
-        "--exp_id", "ecdt_cbweb_all_7",
-        "--bidirection",
-        "--freeze_emb",
-        "--evl_dm", "cookbook,website",
-        "--n_samples", "7",
-        "--hidden_dim", "150",
-        "--emb_dim", "300",
-        "--trs_hidden_dim", "300",
-        "--emb_file", "./data/default/token_emb.npy",
-        "--slot_emb_file", "./data/default/slot_embs_based_on_each_domain.dict",
-        "--tr",
+        "--exp_id", "local2",
+        "--bert_dir", "../resource/baidu_ernie",
+        "--do_lower_case",
+        "--batch_size", "4",
+        "--max_epoch", "12",
+        "--lr", "6e-5",
+        "--load_userdict",
+        "--tst_dm", "all"
     ]
 },
 ```
 
 ```json
 {
-    "name": "fsnlu_fscoach_test",
+    "name": "fsnlu_test",
     "type": "python",
     "request": "launch",
     "program": "${workspaceFolder}/fsnlu/predict.py",
@@ -88,20 +84,13 @@ For vscode user, here are some example configurations:
         "PYTHONPATH": "${workspaceFolder}/fsnlu/",
     },
     "args": [
-        "--exp_name", "coach_lstmenc",
-        "--exp_id", "ecdt_cbweb_all_7",
-        "--bidirection",
-        "--freeze_emb",
-        "--evl_dm", "cookbook,website",
-        "--n_samples", "7",
-        "--hidden_dim", "150",
-        "--emb_dim", "300",
-        "--trs_hidden_dim", "300",
-        "--emb_file", "./data/default/token_emb.npy",
-        "--slot_emb_file", "./data/default/slot_embs_based_on_each_domain.dict",
-        "--model_path", "./fscoach_exp/coach_lstmenc/ecdt_cbweb_all_7/best_model.pth",
-        "--model_type", "coach",
-        "--tr",
+        "--exp_id", "local",
+        "--bert_dir", "../resource/baidu_ernie",
+        "--do_lower_case",
+        "--batch_size", "4",
+        "--lr", "6e-5",
+        "--target", "best_model_{}.pth",
+        "--load_userdict",
     ]
 },
 ```
