@@ -1,9 +1,10 @@
-# fsnlu: A Fast Development Framework for Few-shot Natural language Understanding.
+# fsnlu: A Fast Development Framework for Few-shot Natural Language Understanding.
 Developed on the event of [SMP 2020 ECDT Task1](https://mp.weixin.qq.com/s/_dE7kDw8q7FgHfGTh8DMWw) by [Changjian Liu](https://cjliux.github.io), aiming at integrating various models for few-shot natural language understanding.
+The model implemented here constitutes a part of the system used in the evaluation program.
 
 ## Contents
 
-- [fsnlu: A Fast Development Framework for Few-shot Natural language Understanding.](#fsnlu-a-fast-development-framework-for-few-shot-natural-language-understanding)
+- [fsnlu: A Fast Development Framework for Few-shot Natural Language Understanding.](#fsnlu-a-fast-development-framework-for-few-shot-natural-language-understanding)
   - [Contents](#contents)
   - [Requirement](#requirement)
   - [Data Preprocessing](#data-preprocessing)
@@ -101,7 +102,7 @@ For vscode user, here are some example configurations:
 * et al.
 
 ## References
-We thanks all authors of the involved models for sharing their code and data. Here are the list of works that we refer to and repositories that we may have heavily borrow from:
+We thanks all authors of the involved models for sharing their code and data. Here are the list of works that we refer to and repositories that we may have heavily borrowed from:
 - Coach: A Coarse-to-Fine Approach for Cross-domain Slot Filling. ([code](https://github.com/zliucr/coach))
 - [Few-shot Slot Tagging with Collapsed Dependency Transfer and Label-enhanced Task-adaptive Projection Network](https://atmahou.github.io/attachments/atma's_acl2020_FewShot.pdf) ([code](https://github.com/AtmaHou/FewShotTagging))
 
